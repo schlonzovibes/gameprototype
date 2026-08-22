@@ -19,18 +19,19 @@ NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "24576"))
 
 CONTRACT = """
 AUSGABEFORMAT (verbindlich, keine Ausnahme):
-Antworte ausschliesslich mit dem in Abschnitt 37 (REQUIRED OUTPUT FORMAT)
-definierten einzelnen JSON-Objekt mit den vier Top-Level-Feldern
-"game", "state_update", "scene", "player_agency".
+Antworte ausschliesslich mit dem einzelnen JSON-Objekt aus dem Abschnitt
+"REQUIRED OUTPUT FORMAT" mit den fuenf Top-Level-Feldern "game",
+"state_update", "scene", "player_agency", "final_scene_output".
 Kein Vorwort, kein Nachwort, keine Code-Fences, keine Kommentare im JSON.
 
 Feldregeln fuer die vom Client weiterverarbeiteten Felder:
-- scene.visual_scene_description: englische Bildbeschreibung, 20-45 Woerter,
-  nur Bildinhalt: Ort, Licht, Perspektive, Materialien, Atmosphaere.
-  Keine Handlung, keine Sprache, kein Text im Bild.
-- scene.narrator_text: deutscher Erzaehltext, 60-120 Woerter, zweite Person.
+- final_scene_output.visual_scene_description: englische Bildbeschreibung,
+  20-45 Woerter, nur Bildinhalt: Ort, Licht, Perspektive, Materialien,
+  Atmosphaere. Keine Handlung, keine Sprache, kein Text im Bild.
+- final_scene_output.narrator_text: deutscher Erzaehltext, 60-120 Woerter,
+  zweite Person.
 - scene.visual_prompt: englisch, direkt fuer ein Bildmodell nutzbar,
-  konsistent mit visual_scene_description und den persistenten Charakteren.
+  konsistent mit der Bildbeschreibung und den persistenten Charakteren.
 """.strip()
 
 
@@ -128,10 +129,16 @@ def parse_scene(raw: str) -> dict:
             obj = None
         if isinstance(obj, dict):
             scene = obj.get("scene") if isinstance(obj.get("scene"), dict) else {}
+            final = (obj.get("final_scene_output")
+                     if isinstance(obj.get("final_scene_output"), dict) else {})
             game = obj.get("game") if isinstance(obj.get("game"), dict) else {}
-            visual = str(scene.get("visual_scene_description")
+            # Neu: final_scene_output. Fallbacks halten aeltere Formate lauffaehig.
+            visual = str(final.get("visual_scene_description")
+                         or scene.get("visual_scene_description")
+                         or scene.get("visual_prompt")
                          or obj.get("visual", "")).strip()
-            narration = str(scene.get("narrator_text")
+            narration = str(final.get("narrator_text")
+                            or scene.get("narrator_text")
                             or obj.get("narration", "")).strip() or text
             return {
                 "visual": visual,

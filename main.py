@@ -4,7 +4,8 @@
 Ablauf:
     1. LLM auswaehlen (Pfeiltasten) -> laden
     2. Diffusion-Modell auswaehlen -> laden
-    3. game_prompt.txt einlesen, erste Szene erzeugen
+    3. Titel anzeigen, START_PROMPT eingeben (ersetzt $START_PROMPT$
+       in game_prompt.txt)
     4. Schleife: Bild (Viewport) / Erzaehltext / Trennlinie / Prompt
 
 Start:  python3 main.py
@@ -24,6 +25,7 @@ import ui
 
 HERE = Path(__file__).resolve().parent
 PROMPT_FILE = HERE / "game_prompt.txt"
+TITLE_FILE = HERE / "title_screen.txt"
 
 VIEWPORT_COLS_CAP = 80  # max. Bildbreite in Zellen
 TEXT_ROWS = 10          # Zeilen-Reserve fuer Erzaehltext + Prompt
@@ -59,10 +61,24 @@ def pick_models() -> tuple[llm.LLM, diffusion.Diffusion]:
     return engine, painter
 
 
-def read_system_prompt() -> str:
+def read_system_prompt(start_prompt: str) -> str:
     if not PROMPT_FILE.exists():
         sys.exit(f"{PROMPT_FILE.name} fehlt.")
-    return PROMPT_FILE.read_text(encoding="utf-8").strip() + "\n\n" + llm.CONTRACT
+    text = PROMPT_FILE.read_text(encoding="utf-8")
+    if "$START_PROMPT$" not in text:
+        sys.exit("$START_PROMPT$ fehlt in game_prompt.txt.")
+    return (text.replace("$START_PROMPT$", start_prompt).strip()
+            + "\n\n" + llm.CONTRACT)
+
+
+def show_title() -> None:
+    """ASCII-Titel drucken. Fehlt die Datei: stilistisch ueberspringen."""
+    if not TITLE_FILE.exists():
+        return
+    sys.stdout.write(ui.DIM)
+    for line in TITLE_FILE.read_text(encoding="utf-8").splitlines():
+        sys.stdout.write(line.rstrip() + "\n")
+    sys.stdout.write(ui.RESET)
 
 
 # ------------------------------------------------------------------ Render
@@ -89,7 +105,14 @@ def main() -> None:
         sys.exit("Bitte in einem interaktiven Terminal starten.")
 
     engine, painter = pick_models()
-    system = read_system_prompt()
+
+    ui.clear()
+    show_title()
+    sys.stdout.write("\n" + ui.DIM)
+    sys.stdout.write(" REPLOT YOUR STORY:\n" + ui.RESET)
+    start_prompt = ui.ask()
+
+    system = read_system_prompt(start_prompt)
     messages: list[dict] = [{"role": "system", "content": system}]
     turn = "Beginne. Erzeuge die erste Szene."
 
