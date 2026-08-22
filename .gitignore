@@ -1,0 +1,7 @@
+# Alles ignorieren ...
+*
+
+# ... ausser Python- und Text-Dateien (sowie dieser Datei)
+!.gitignore
+!*.py
+!*.txt
