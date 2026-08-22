@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.request
 
 from discovery import OLLAMA_URL, Model
@@ -16,6 +17,10 @@ from discovery import OLLAMA_URL, Model
 # Kontextfenster: game_prompt.txt allein braucht schon ~9K Tokens,
 # dazu Start-Prompt, Verlauf und Generierungsraum.
 NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "24576"))
+
+# Reasoning-Modus: Denkprozess der Modelle einschalten (kostet Zeit,
+# landet getrennt vom JSON in message.thinking bzw. <think>-Block).
+THINK = os.environ.get("AIGAME_THINK", "0").lower() in ("1", "true", "on", "yes")
 
 CONTRACT = """
 AUSGABEFORMAT (verbindlich, keine Ausnahme):
@@ -36,6 +41,8 @@ Feldregeln fuer die vom Client weiterverarbeiteten Felder:
 
 
 class LLM:
+    last_thinking: str = ""   # Reasoning-Text des letzten complete()-Aufrufs
+
     def scene(self, messages: list[dict]) -> dict:
         raw = self.complete(messages)
         return parse_scene(raw)
@@ -47,6 +54,7 @@ class LLM:
 class Ollama(LLM):
     def __init__(self, model: Model):
         self.name = model.ref
+        self.last_thinking = ""
 
     def load(self) -> None:
         """Modell in den Speicher ziehen, ohne Text zu erzeugen."""
@@ -54,18 +62,23 @@ class Ollama(LLM):
                                      "keep_alive": "30m", "stream": False})
 
     def complete(self, messages: list[dict]) -> str:
-        data = self._post("/api/chat", {
+        payload = {
             "model": self.name,
             "messages": messages,
             "stream": False,
             "format": "json",
             "options": {"temperature": 0.9, "num_ctx": NUM_CTX},
-        })
+        }
+        if THINK:
+            payload["think"] = True
+        data = self._post("/api/chat", payload)
         # Ollama meldet Fehler manchmal mit HTTP 200 - dann steht
         # die Ursache im error-Feld und der Content bleibt leer.
         if data.get("error"):
             raise RuntimeError(f"Ollama: {data['error']}")
-        content = data.get("message", {}).get("content", "").strip()
+        message = data.get("message", {})
+        self.last_thinking = message.get("thinking") or ""
+        content = message.get("content", "").strip()
         if not content:
             raise RuntimeError(
                 f"Ollama lieferte eine leere Antwort von {self.name} "
@@ -83,9 +96,12 @@ class Ollama(LLM):
 
 
 class LlamaCpp(LLM):
+    _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+
     def __init__(self, model: Model):
         self.path = model.ref
         self.llm = None
+        self.last_thinking = ""
 
     def load(self) -> None:
         from llama_cpp import Llama
@@ -104,7 +120,15 @@ class LlamaCpp(LLM):
             max_tokens=int(os.environ.get("AIGAME_MAX_TOKENS", "2048")),
             response_format={"type": "json_object"},
         )
-        return out["choices"][0]["message"]["content"]
+        content = out["choices"][0]["message"]["content"]
+        # Denkmodelle geben <think>...</think> inline im Content aus.
+        self.last_thinking = ""
+        if THINK:
+            match = self._THINK_RE.search(content)
+            if match:
+                self.last_thinking = match.group(1).strip()
+                content = self._THINK_RE.sub("", content, count=1).strip()
+        return content
 
 
 def build(model: Model) -> LLM:

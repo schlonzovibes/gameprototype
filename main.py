@@ -26,6 +26,7 @@ import ui
 HERE = Path(__file__).resolve().parent
 PROMPT_FILE = HERE / "game_prompt.txt"
 TITLE_FILE = HERE / "title_screen.txt"
+DEBUG_DIR = HERE / "debug"
 
 VIEWPORT_COLS_CAP = 80  # max. Bildbreite in Zellen
 TEXT_ROWS = 10          # Zeilen-Reserve fuer Erzaehltext + Prompt
@@ -98,6 +99,32 @@ def render(image, narration: str) -> None:
     print()
 
 
+# ------------------------------------------------------------------ Debug
+
+def _debug_file(start_prompt: str) -> Path:
+    """Dateiname aus dem Start-Prompt: bereinigt, gekürzt, kollisionsfrei."""
+    import re
+
+    slug = re.sub(r"[^\w\s.-]", "", start_prompt, flags=re.UNICODE).strip()
+    slug = re.sub(r"\s+", "_", slug)[:80].strip("._-") or "ohne_titel"
+    path = DEBUG_DIR / f"{slug}.txt"
+    n = 2
+    while path.exists():
+        path = DEBUG_DIR / f"{slug}-{n}.txt"
+        n += 1
+    return path
+
+
+def _log_scene(log, engine, scene: dict, number: int) -> None:
+    """LLM-Output (inkl. Thinking) 1x pro Zug in die Debug-Datei schreiben."""
+    log.write(f"==================== Szene {number} ====================\n\n")
+    if getattr(engine, "last_thinking", ""):
+        log.write("[THINKING]\n" + engine.last_thinking.strip() + "\n\n")
+    log.write("[OUTPUT]\n" + scene["raw"].strip() + "\n\n")
+    log.write("-" * 60 + "\n\n")
+    log.flush()
+
+
 # ------------------------------------------------------------------ Loop
 
 def main() -> None:
@@ -116,8 +143,13 @@ def main() -> None:
     messages: list[dict] = [{"role": "system", "content": system}]
     turn = "Beginne. Erzeuge die erste Szene."
 
+    DEBUG_DIR.mkdir(exist_ok=True)
+    log = _debug_file(start_prompt).open("w", encoding="utf-8")
+
     try:
+        scene_number = 0
         while True:
+            scene_number += 1
             messages.append({"role": "user", "content": turn})
 
             try:
@@ -140,6 +172,8 @@ def main() -> None:
                 messages.pop()
                 turn = ui.ask()
                 continue
+
+            _log_scene(log, engine, scene, scene_number)
 
             # Vollstaendiges JSON im Verlauf behalten: die persistente
             # Welt (state_update) lebt von diesen Nachrichten.
@@ -164,6 +198,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        log.close()
         ui.show_cursor()
         print()
 
