@@ -97,8 +97,27 @@ def main() -> None:
         while True:
             messages.append({"role": "user", "content": turn})
 
-            with ui.Status("das Sprachmodell arbeitet"):
-                scene = engine.scene(_trim(messages))
+            try:
+                with ui.Status("das Sprachmodell arbeitet"):
+                    scene = engine.scene(_trim(messages))
+            except Exception as e:
+                # Fehler sichtbar machen statt still abzuwarten.
+                print()
+                print(ui.wrap(f"Sprachmodell-Fehler: {e}", TEXT_WIDTH,
+                              indent=" " * MARGIN))
+                print()
+                messages.pop()   # Turn nicht doppelt im Verlauf behalten
+                turn = ui.ask()
+                continue
+
+            if not scene["narration"] and not scene["visual"]:
+                print(ui.wrap("Unbrauchbare Antwort des Sprachmodells - "
+                              "bitte erneut versuchen.", TEXT_WIDTH,
+                              indent=" " * MARGIN))
+                messages.pop()
+                turn = ui.ask()
+                continue
+
             # Vollstaendiges JSON im Verlauf behalten: die persistente
             # Welt (state_update) lebt von diesen Nachrichten.
             messages.append({"role": "assistant", "content": scene["raw"]})

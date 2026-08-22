@@ -13,6 +13,10 @@ import urllib.request
 
 from discovery import OLLAMA_URL, Model
 
+# Kontextfenster: game_prompt.txt allein braucht schon ~9K Tokens,
+# dazu Start-Prompt, Verlauf und Generierungsraum.
+NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "24576"))
+
 CONTRACT = """
 AUSGABEFORMAT (verbindlich, keine Ausnahme):
 Antworte ausschliesslich mit dem in Abschnitt 37 (REQUIRED OUTPUT FORMAT)
@@ -54,9 +58,18 @@ class Ollama(LLM):
             "messages": messages,
             "stream": False,
             "format": "json",
-            "options": {"temperature": 0.9, "num_ctx": 8192},
+            "options": {"temperature": 0.9, "num_ctx": NUM_CTX},
         })
-        return data.get("message", {}).get("content", "")
+        # Ollama meldet Fehler manchmal mit HTTP 200 - dann steht
+        # die Ursache im error-Feld und der Content bleibt leer.
+        if data.get("error"):
+            raise RuntimeError(f"Ollama: {data['error']}")
+        content = data.get("message", {}).get("content", "").strip()
+        if not content:
+            raise RuntimeError(
+                f"Ollama lieferte eine leere Antwort von {self.name} "
+                f"(num_ctx={NUM_CTX}).")
+        return content
 
     def _post(self, path: str, payload: dict) -> dict:
         req = urllib.request.Request(
@@ -78,7 +91,7 @@ class LlamaCpp(LLM):
 
         self.llm = Llama(
             model_path=self.path,
-            n_ctx=8192,
+            n_ctx=NUM_CTX,
             n_gpu_layers=int(os.environ.get("AIGAME_GPU_LAYERS", "-1")),
             verbose=False,
         )
