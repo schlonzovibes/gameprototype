@@ -6,5 +6,8 @@
 !*.py
 !*.txt
 
+# Docker-Compose-Konfiguration explizit tracken
+!docker-compose.yml
+
 # Debug-Logs nicht tracken (wuerden sonst als *.txt durchrutschen)
 debug/
