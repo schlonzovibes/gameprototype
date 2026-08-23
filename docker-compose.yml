@@ -43,7 +43,7 @@ services:
     # torch wird absichtlich NICHT per pip installiert: es ist im NGC-Image
     # enthalten und auf die CUDA-Version des Containers abgestimmt.
     command: >
-      bash -c "pip install --no-cache-dir 'diffusers>=0.30' transformers accelerate safetensors pillow &&
+      bash -c "pip install --no-cache-dir 'diffusers>=0.36' transformers accelerate safetensors pillow &&
                sleep infinity
                "
     # Optional nur fuer GGUF-Sprachmodelle via llama.cpp (Ollama braucht nichts):

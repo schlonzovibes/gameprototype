@@ -117,6 +117,15 @@ _DIFFUSION_HINTS = ("stable-diffusion", "sdxl", "sd-", "sd3", "flux", "kandinsky
                     "playground", "pixart", "dreamshaper", "juggernaut", "realvis")
 
 
+def _repo_label(repo: Path) -> str:
+    """Sprechender Name - loest die HF-Cache-Struktur auf
+    (models--org--name/snapshots/<sha> -> org/name)."""
+    for parent in repo.parents:
+        if parent.name.startswith("models--"):
+            return parent.name.replace("models--", "").replace("--", "/")
+    return repo.name
+
+
 def _diffusers_repos() -> list[Model]:
     out, seen = [], set()
     for root in _roots():
@@ -126,7 +135,7 @@ def _diffusers_repos() -> list[Model]:
             continue
         for idx in candidates:
             repo = idx.parent
-            name = repo.name
+            name = _repo_label(repo)
             if name in seen:
                 continue
             seen.add(name)
@@ -135,17 +144,28 @@ def _diffusers_repos() -> list[Model]:
     return out
 
 
-_COMPONENT_DIRS = ("/unet/", "/vae/", "/text_encoder/", "/tokenizer/",
-                   "/safety_checker/", "/feature_extractor/")
+_COMPONENT_DIRS = ("/unet/", "/vae/", "/transformer/", "/scheduler/",
+                   "/text_encoder/", "/tokenizer/", "/safety_checker/",
+                   "/feature_extractor/")
 
 
 def _diffusion_files() -> list[Model]:
     out, seen = [], set()
     for root in _roots():
+        try:
+            repos = [d.parent.resolve() for d in root.rglob("model_index.json")]
+        except (OSError, PermissionError):
+            repos = []
         for p in _scan(root, ("*.safetensors", "*.ckpt")):
             low = str(p).lower()
             # Komponentengewichte eines Diffusers-Repos gehoeren nicht in die Liste
             if any(c in low for c in _COMPONENT_DIRS):
+                continue
+            try:
+                resolved = p.resolve()
+            except OSError:
+                continue
+            if any(resolved.is_relative_to(d) for d in repos):
                 continue
             # Heuristik: entweder in einem Checkpoint-Ordner oder mit sprechendem Namen
             in_ckpt_dir = any(d in low for d in ("checkpoint", "stable-diffusion", "unet-single"))
