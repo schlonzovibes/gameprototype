@@ -76,13 +76,13 @@ def _key() -> str:
 def select(title: str, labels: list[str]) -> int:
     """Pfeiltasten-Auswahl. Gibt den Index des gewaehlten Eintrags zurueck."""
     if not labels:
-        raise SystemExit(f"{title}: nichts gefunden.")
+        raise SystemExit(f"{title}: nothing found.")
 
     width = cols() - 6
     view = [l if len(l) <= width else l[: width - 1] + "\u2026" for l in labels]
 
     print(title)
-    print(DIM + "\u2191/\u2193 w\u00e4hlen \u00b7 Enter laden \u00b7 q beenden" + RESET)
+    print(DIM + "\u2191/\u2193 select \u00b7 Enter confirm \u00b7 q quit" + RESET)
     print()
     for _ in view:
         print()
