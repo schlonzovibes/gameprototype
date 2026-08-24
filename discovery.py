@@ -1,7 +1,7 @@
 """Findet lokal verfuegbare Modelle.
 
-LLM:        Ollama-Server (find_ollama), HF-Cache-Repos fuer vLLM (find_vllm),
-            GGUF-Dateien (llama.cpp / LM Studio, derzeit nicht im Menue)
+LLM:        Ollama-Server (find_ollama), GGUF-Dateien (find_ggufs, llama.cpp),
+            HF-Cache-Repos fuer vLLM (find_vllm)
 Diffusion:  nur FLUX - Diffusers-Repos im HF-Cache,
             Single-File-Checkpoints (.safetensors/.ckpt) mit 'flux' im Namen
 
@@ -25,6 +25,10 @@ DIMSEP = "\u00b7 "   # Trenner fuer Groessenangaben in Labels
 
 _DEFAULT_ROOTS = [
     Path.cwd() / "models",
+    # Projekt-Caches (im Container via /root/.cache gemountet, auf dem
+    # Host direkt) - hier liegen GGUFs, vLLM-Repos und FLUX.
+    Path.cwd() / "cache" / "huggingface" / "hub",
+    Path.cwd() / "cache" / "hub",
     Path.home() / "models",
     Path.home() / ".cache" / "huggingface" / "hub",
     Path.home() / ".cache" / "lm-studio" / "models",
@@ -95,7 +99,9 @@ def _ollama_models() -> list[Model]:
     return out
 
 
-def _gguf_models() -> list[Model]:
+def find_ggufs() -> list[Model]:
+    """GGUF-Dateien aus allen Scan-Roots (u.a. Projekt-Cache), fuer das
+    llama.cpp-Backend. Dubletten ueber den Dateinamen aufgeloest."""
     out, seen = [], set()
     for root in _roots():
         for p in _scan(root, ("*.gguf",)):

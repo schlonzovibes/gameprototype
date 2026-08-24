@@ -54,9 +54,14 @@ def pick_models() -> tuple[llm.LLM, diffusion.Diffusion]:
 
     with ui.Status("searching language models"):
         llms = finder[backend]()
+        if backend == "ollama":
+            # GGUFs aus dem Projekt-Cache laufen im llama.cpp-Backend,
+            # gehoeren aber in dieselbe Auswahl.
+            llms += discovery.find_ggufs()
     if not llms:
         if backend == "ollama":
-            sys.exit("No language models found. Is Ollama running?")
+            sys.exit("No language models found. Is Ollama running and are "
+                     "there *.gguf files in the cache folders?")
         sys.exit("No language models found in the local HF cache "
                  "(FLUX and other image models are skipped by design).")
     choice = llms[ui.select("Language model", [m.label for m in llms])]

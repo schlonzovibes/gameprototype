@@ -121,7 +121,14 @@ class LlamaCpp(LLM):
         self.last_thinking = ""
 
     def load(self) -> None:
-        from llama_cpp import Llama
+        try:
+            from llama_cpp import Llama
+        except ImportError:
+            raise RuntimeError(
+                "Python package 'llama-cpp-python' is missing - GGUF models "
+                "need it. Install inside the container with: "
+                "CMAKE_ARGS='-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=native' "
+                "FORCE_CMAKE=1 pip install llama-cpp-python") from None
 
         self.llm = Llama(
             model_path=self.path,

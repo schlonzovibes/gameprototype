@@ -24,10 +24,14 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     working_dir: /workspace/gameprototype
+    # Umbrueche NUR nach && / || setzen - YAML '>' haelt tiefer eingerueckte
+    # Zeilen literal, und bash verlangt die Operatoren am Zeilenende.
     command: >
-      bash -c "pip install --no-cache-dir 'diffusers>=0.36' transformers accelerate safetensors pillow docker &&
-               sleep infinity
-               "
+      bash -c "pip install 'diffusers>=0.36' transformers accelerate safetensors pillow docker &&
+        (CMAKE_ARGS='-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=native' FORCE_CMAKE=1 pip install llama-cpp-python ||
+        echo 'WARN: llama-cpp-python build fehlgeschlagen - GGUF-Modelle nicht verfuegbar') &&
+        sleep infinity
+        "
     depends_on:
       - vllm          # nur gestartet, nicht 'healthy' - der Server wird erst vom Spiel beladen
     deploy:
