@@ -1,7 +1,9 @@
 """Findet lokal verfuegbare Modelle.
 
-LLM:        Ollama-Server, GGUF-Dateien (llama.cpp / LM Studio)
-Diffusion:  Diffusers-Repos im HF-Cache, Single-File-Checkpoints (.safetensors/.ckpt)
+LLM:        Ollama-Server (find_ollama), HF-Cache-Repos fuer vLLM (find_vllm),
+            GGUF-Dateien (llama.cpp / LM Studio, derzeit nicht im Menue)
+Diffusion:  nur FLUX - Diffusers-Repos im HF-Cache,
+            Single-File-Checkpoints (.safetensors/.ckpt) mit 'flux' im Namen
 
 Zusaetzliche Suchpfade per Umgebungsvariable:
     AIGAME_MODEL_DIRS=/pfad/a:/pfad/b
@@ -17,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+VLLM_URL = os.environ.get("VLLM_URL", "http://127.0.0.1:8000")
 
 DIMSEP = "\u00b7 "   # Trenner fuer Groessenangaben in Labels
 
@@ -185,9 +188,108 @@ def _diffusion_files() -> list[Model]:
     return out
 
 
-def find_llms() -> list[Model]:
-    return _ollama_models() + _gguf_models()
+# ---------------------------------------------------------------------- vLLM
+
+# Scan-Reihenfolge egal: Dubletten (z.B. gleiche Mounts im Container)
+# werden ueber den Repo-Namen aufgeloest, der vollstaendigste Snapshot gewinnt.
+_VLLM_ROOTS = (
+    Path.cwd() / "cache" / "huggingface" / "hub",
+    Path.cwd() / "cache" / "hub",
+    Path.home() / ".cache" / "huggingface" / "hub",
+)
+
+# Bildmodelle duerfen hier nie auftauchen - doppelt haelt besser:
+# der model_index.json-Check faengt Diffusers-Repos, die Blocklist die
+# FLUX-Familie und kaputte/angebrochene Stable-Diffusion-Downloads.
+_LLM_BLOCKLIST = ("flux", "black-forest-labs",
+                  "stable-diffusion", "stabilityai", "sdxl")
+
+
+def _hf_repo_label(repo: Path) -> str:
+    """models--org--name -> org/name (gleiche Dekodierung wie _repo_label)."""
+    return repo.name.replace("models--", "").replace("--", "/")
+
+
+def _vllm_snapshot(repo: Path) -> Path | None:
+    """Neuester vollstaendiger Snapshot (config.json + alle Gewichte) oder None.
+
+    Snapshots ohne config.json oder ohne *.safetensors sind angefangene
+    Downloads bzw. Stubs; gegen die shard-Liste im Index wird geprueft,
+    ob wirklich alle Gewichte da sind.
+    """
+    try:
+        candidates = [d for d in (repo / "snapshots").iterdir() if d.is_dir()]
+        candidates.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    for snap in candidates:
+        try:
+            if not (snap / "config.json").is_file():
+                continue
+            if not any(snap.glob("*.safetensors")):
+                continue
+        except OSError:
+            continue
+        if (snap / "model_index.json").exists():
+            continue
+        index = snap / "model.safetensors.index.json"
+        if index.is_file():
+            try:
+                shards = set(json.loads(
+                    index.read_text(encoding="utf-8"))["weight_map"].values())
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            if not all((snap / s).exists() for s in shards):
+                continue
+        return snap
+    return None
+
+
+def _vllm_cache_models() -> list[Model]:
+    out: dict[str, tuple[Model, int]] = {}
+    for root in _VLLM_ROOTS:
+        try:
+            repos = [d for d in root.iterdir()
+                     if d.is_dir() and d.name.startswith("models--")]
+        except OSError:
+            continue
+        for repo in repos:
+            label = _hf_repo_label(repo)
+            if any(b in label.lower() for b in _LLM_BLOCKLIST):
+                continue
+            snap = _vllm_snapshot(repo)
+            if snap is None:
+                continue
+            try:
+                size = sum(p.stat().st_size for p in snap.glob("*.safetensors"))
+            except OSError:
+                continue
+            prev = out.get(label)
+            if prev is None or size > prev[1]:
+                out[label] = (
+                    Model("llm", "vllm", label,
+                          f"[vllm]       {label}  {DIMSEP}{_human(size)}"),
+                    size,
+                )
+    return [out[k][0] for k in sorted(out)]
+
+
+def find_ollama() -> list[Model]:
+    return _ollama_models()
+
+
+def find_vllm() -> list[Model]:
+    return _vllm_cache_models()
+
+
+def _is_flux(model: Model) -> bool:
+    """FLUX-Erkennung ueber Pfad und Label, gross-/klein unabhaengig
+    (trifft models--black-forest-labs--FLUX... genauso wie flux1-dev.safetensors)."""
+    return "flux" in model.ref.lower() or "flux" in model.label.lower()
 
 
 def find_diffusion() -> list[Model]:
-    return _diffusers_repos() + _diffusion_files()
+    """Nur FLUX-Modelle: Repos und Checkpoints ohne 'flux' im Namen
+    werden bewusst nicht angeboten."""
+    return [m for m in _diffusers_repos() + _diffusion_files()
+            if _is_flux(m)]

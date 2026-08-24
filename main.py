@@ -2,11 +2,14 @@
 """AI-Game-Prototyp - Terminal-Runner.
 
 Ablauf:
-    1. LLM auswaehlen (Pfeiltasten) -> laden
+    1. Inferenz-Backend waehlen (Ollama / vLLM), Sprachmodell laden
     2. Diffusion-Modell auswaehlen -> laden
     3. Titel anzeigen, START_PROMPT eingeben (ersetzt $START_PROMPT$
        in game_prompt.txt)
     4. Schleife: Bild (Viewport) / Erzaehltext / Trennlinie / Prompt
+
+Ein Durchlauf endet bei Spielende oder "/restart". Beides fuehrt zurueck
+zum Titelbildschirm - Sprach- und Bildmodell bleiben dafuer geladen.
 
 Start:  python3 main.py
 """
@@ -34,29 +37,41 @@ TEXT_WIDTH = 72
 MARGIN = 2
 HISTORY_TURNS = 12      # wie viele Zuege im Kontext bleiben
 
+RESTART_CMD = "/restart"
+HINT_SCENE = 15         # ab dieser Szene den Restart-Hinweis einblenden
+
 
 # ------------------------------------------------------------------ Setup
 
 def pick_models() -> tuple[llm.LLM, diffusion.Diffusion]:
+    """Backend + Sprachmodell + Bildmodell - nur einmal pro Sitzung."""
     ui.clear()
 
-    with ui.Status("suche verf\u00fcgbare Sprachmodelle"):
-        llms = discovery.find_llms()
+    backends = [f"[ollama] {discovery.OLLAMA_URL}", f"[vllm]   {discovery.VLLM_URL}"]
+    finder = {"ollama": discovery.find_ollama,
+              "vllm": discovery.find_vllm}
+    backend = ("ollama", "vllm")[ui.select("Inference backend", backends)]
+
+    with ui.Status("searching language models"):
+        llms = finder[backend]()
     if not llms:
-        sys.exit("Keine LLMs gefunden. Ollama starten oder AIGAME_MODEL_DIRS setzen.")
-    choice = llms[ui.select("Sprachmodell", [m.label for m in llms])]
+        if backend == "ollama":
+            sys.exit("No language models found. Is Ollama running?")
+        sys.exit("No language models found in the local HF cache "
+                 "(FLUX and other image models are skipped by design).")
+    choice = llms[ui.select("Language model", [m.label for m in llms])]
     engine = llm.build(choice)
-    with ui.Status(f"lade {choice.ref}"):
+    with ui.Status(f"loading {choice.ref}"):
         engine.load()
 
     ui.clear()
-    with ui.Status("suche verf\u00fcgbare Diffusionsmodelle"):
+    with ui.Status("searching diffusion models"):
         diffs = discovery.find_diffusion()
     if not diffs:
-        sys.exit("Keine Diffusionsmodelle gefunden. AIGAME_MODEL_DIRS setzen.")
-    picked = diffs[ui.select("Bildmodell", [m.label for m in diffs])]
+        sys.exit("No FLUX diffusion models found. Set AIGAME_MODEL_DIRS.")
+    picked = diffs[ui.select("Image model", [m.label for m in diffs])]
     painter = diffusion.Diffusion(picked)
-    with ui.Status(f"lade {Path(picked.ref).name}"):
+    with ui.Status(f"loading {Path(picked.ref).name}"):
         painter.load()
 
     return engine, painter
@@ -64,10 +79,10 @@ def pick_models() -> tuple[llm.LLM, diffusion.Diffusion]:
 
 def read_system_prompt(start_prompt: str) -> str:
     if not PROMPT_FILE.exists():
-        sys.exit(f"{PROMPT_FILE.name} fehlt.")
+        sys.exit(f"{PROMPT_FILE.name} is missing.")
     text = PROMPT_FILE.read_text(encoding="utf-8")
     if "$START_PROMPT$" not in text:
-        sys.exit("$START_PROMPT$ fehlt in game_prompt.txt.")
+        sys.exit("$START_PROMPT$ missing in game_prompt.txt.")
     return (text.replace("$START_PROMPT$", start_prompt).strip()
             + "\n\n" + llm.CONTRACT)
 
@@ -106,7 +121,7 @@ def _debug_file(start_prompt: str) -> Path:
     import re
 
     slug = re.sub(r"[^\w\s.-]", "", start_prompt, flags=re.UNICODE).strip()
-    slug = re.sub(r"\s+", "_", slug)[:80].strip("._-") or "ohne_titel"
+    slug = re.sub(r"\s+", "_", slug)[:80].strip("._-") or "untitled"
     path = DEBUG_DIR / f"{slug}.txt"
     n = 2
     while path.exists():
@@ -117,7 +132,7 @@ def _debug_file(start_prompt: str) -> Path:
 
 def _log_scene(log, engine, scene: dict, number: int) -> None:
     """LLM-Output (inkl. Thinking) 1x pro Zug in die Debug-Datei schreiben."""
-    log.write(f"==================== Szene {number} ====================\n\n")
+    log.write(f"==================== scene {number} ====================\n\n")
     if getattr(engine, "last_thinking", ""):
         log.write("[THINKING]\n" + engine.last_thinking.strip() + "\n\n")
     log.write("[OUTPUT]\n" + scene["raw"].strip() + "\n\n")
@@ -125,14 +140,24 @@ def _log_scene(log, engine, scene: dict, number: int) -> None:
     log.flush()
 
 
-# ------------------------------------------------------------------ Loop
+# ------------------------------------------------------------------ Input
 
-def main() -> None:
-    if not sys.stdin.isatty():
-        sys.exit("Bitte in einem interaktiven Terminal starten.")
+def _ask_turn(scene_number: int) -> str | None:
+    """Naechste Eingabe; None bedeutet: Neustart angefordert."""
+    if scene_number >= HINT_SCENE:
+        print(ui.DIM + f" type {RESTART_CMD} to begin a new story" + ui.RESET)
+    value = ui.ask()
+    return None if value.lower() == RESTART_CMD else value
 
-    engine, painter = pick_models()
 
+# ------------------------------------------------------------------ Story
+
+def run_story(engine, painter) -> bool:
+    """Ein kompletter Durchlauf. True: noch eine Geschichte starten.
+
+    Die Modelle bleiben geladen - hier wird nur Konversation, Szene-
+    zaehler und Log-Datei neu aufgesetzt.
+    """
     ui.clear()
     show_title()
     sys.stdout.write("\n" + ui.DIM)
@@ -153,24 +178,28 @@ def main() -> None:
             messages.append({"role": "user", "content": turn})
 
             try:
-                with ui.Status("das Sprachmodell arbeitet"):
+                with ui.Status("the language model is working"):
                     scene = engine.scene(_trim(messages))
             except Exception as e:
                 # Fehler sichtbar machen statt still abzuwarten.
                 print()
-                print(ui.wrap(f"Sprachmodell-Fehler: {e}", TEXT_WIDTH,
+                print(ui.wrap(f"Language model error: {e}", TEXT_WIDTH,
                               indent=" " * MARGIN))
                 print()
                 messages.pop()   # Turn nicht doppelt im Verlauf behalten
-                turn = ui.ask()
+                turn = _ask_turn(scene_number)
+                if turn is None:
+                    return True
                 continue
 
             if not scene["narration"] and not scene["visual"]:
-                print(ui.wrap("Unbrauchbare Antwort des Sprachmodells - "
-                              "bitte erneut versuchen.", TEXT_WIDTH,
+                print(ui.wrap("Unusable response from the language model - "
+                              "please try again.", TEXT_WIDTH,
                               indent=" " * MARGIN))
                 messages.pop()
-                turn = ui.ask()
+                turn = _ask_turn(scene_number)
+                if turn is None:
+                    return True
                 continue
 
             _log_scene(log, engine, scene, scene_number)
@@ -181,7 +210,7 @@ def main() -> None:
 
             image = None
             if scene["visual"]:
-                with ui.Status("das Bildmodell arbeitet"):
+                with ui.Status("the image model is working"):
                     try:
                         image = painter.render(scene["visual"])
                     except Exception:
@@ -189,16 +218,35 @@ def main() -> None:
 
             render(image, scene["narration"])
             if scene["completed"]:
-                print(ui.wrap("Die Reise ist zu Ende.", TEXT_WIDTH,
+                print(ui.wrap("The journey has ended.", TEXT_WIDTH,
                               indent=" " * MARGIN))
-                break
-            turn = ui.ask()
+                print()
+                return ui.select("What next?",
+                                 ["start a new story", "quit"]) == 0
+
+            turn = _ask_turn(scene_number)
+            if turn is None:
+                return True
+    finally:
+        log.close()
+
+
+# ------------------------------------------------------------------ Loop
+
+def main() -> None:
+    if not sys.stdin.isatty():
+        sys.exit("Please run inside an interactive terminal.")
+
+    engine, painter = pick_models()
+
+    try:
+        while run_story(engine, painter):
+            pass   # Neustart: gleiche Modelle, neue Geschichte
     except SystemExit:
         raise
     except KeyboardInterrupt:
         pass
     finally:
-        log.close()
         ui.show_cursor()
         print()
 

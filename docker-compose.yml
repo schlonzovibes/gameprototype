@@ -1,57 +1,59 @@
-# Liste aller Container dieses Stacks
 services:
-
-  # Servicename (docker compose exec gameprototype)
   gameprototype:
-    image: nvcr.io/nvidia/pytorch:26.07-py3   # Registry/Repository/Tag des verwendeten Images
-    container_name: gameprototype   # Fester Containername statt Zufalls-ID
-    stdin_open: true                # Entspricht -i: STDIN offen halten (interaktiv)
-    tty: true                       # Entspricht -t: Pseudo-Terminal zuweisen
-    ipc: host                       # Teilt Shared Memory mit Host
-
+    image: nvcr.io/nvidia/pytorch:26.07-py3
+    container_name: gameprototype
+    stdin_open: true
+    tty: true
+    ipc: host
     volumes:
-      # Bind Mount: Python-Skripte des Spiels im Container sichtbar machen
-      # "root" ist der Benutzername! innerhalb des Containers
       - ~/git/gameprototype:/workspace/gameprototype
-
-      # Persistenter Modell-Cache (HuggingFace-Hub, Torch-Hub, Diffusers)
       - ~/git/gameprototype/cache:/root/.cache
-
-    # Option A: Spiel nutzt den auf dem Host laufenden Ollama-Daemon
-    # (127.0.0.1 waere der Container selbst - deshalb host-gateway).
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # vLLM-Server aus dem Spiel heraus steuern (llm.VLLM.load)
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      OLLAMA_URL: http://host.docker.internal:11434   # von discovery.py gelesen
-      AIGAME_MODEL_DIRS: /workspace/gameprototype/diffusion_models   # lokale Diffusionsmodelle
-      AIGAME_NUM_CTX: 24576   # Kontextfenster (game_prompt.txt allein ~9K Tokens)
-      AIGAME_THINK: "1"   # Reasoning-Modus: Denkprozess in message.thinking
-
-      # Terminal-Erkennung fuer die Bildprotokolle (kitty/iterm/sixel):
-      # Werte werden beim "docker compose up" aus DEINEM Terminal-Fenster
-      # uebernommen. Nach Terminalwechsel: up -d --force-recreate erneut.
-      # Manuelles Erzwingen geht jederzeit mit AIGAME_IMAGE_PROTOCOL.
+      VLLM_URL: http://vllm:8000   # wird von discovery.py/llm.py gelesen
+      # Ollama laeuft auf dem Host - nur via host-gateway erreichbar
+      # (Voraussetzung: OLLAMA_HOST=0.0.0.0 ollama serve auf dem Host).
+      OLLAMA_URL: http://host.docker.internal:11434
+      AIGAME_MODEL_DIRS: /workspace/gameprototype/diffusion_models
+      AIGAME_NUM_CTX: 24576
+      AIGAME_THINK: "1"
       TERM: ${TERM:-xterm-256color}
       TERM_PROGRAM: ${TERM_PROGRAM:-}
       KITTY_WINDOW_ID: ${KITTY_WINDOW_ID:-}
-
-    working_dir: /workspace/gameprototype   # Arbeitsverzeichnis beim Containerstart
-
-    # Installiert die fuer das Spiel noetigen Packages bei jedem Start
-    # (idempotent - pip ueberspringt bereits installierte), danach bleibt
-    # der Container fuer Inferenz laufen.
-    # torch wird absichtlich NICHT per pip installiert: es ist im NGC-Image
-    # enthalten und auf die CUDA-Version des Containers abgestimmt.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    working_dir: /workspace/gameprototype
     command: >
-      bash -c "pip install --no-cache-dir 'diffusers>=0.36' transformers accelerate safetensors pillow &&
+      bash -c "pip install --no-cache-dir 'diffusers>=0.36' transformers accelerate safetensors pillow docker &&
                sleep infinity
                "
-    # Optional nur fuer GGUF-Sprachmodelle via llama.cpp (Ollama braucht nichts):
-    # bash -c "pip install --no-cache-dir 'diffusers>=0.30' transformers accelerate safetensors pillow llama-cpp-python && sleep infinity"
-    deploy:                         # Deployment-Konfiguration, u.a. für Ressourcen
-      resources:                    # Ressourcenanforderungen/-reservierungen
-        reservations:               # Was garantiert reserviert werden soll
-          devices:                  # Liste der zu reservierenden Geräte
-            - driver: nvidia        # Nutzt die NVIDIA-Runtime für die GPU-Zuteilung
-              count: all            # Reserviert alle im System sichtbaren GPUs
-              capabilities: [gpu]   # Fordert GPU-Fähigkeiten an (Ersatz für --gpus all)
+    depends_on:
+      - vllm          # nur gestartet, nicht 'healthy' - der Server wird erst vom Spiel beladen
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  vllm:
+    image: ghcr.io/timothystewart6/vllm-gb10:latest
+    container_name: vllm
+    ipc: host
+    volumes:
+      # gleicher Cache wie das Spiel: jedes gelistete Modell ist servierbar,
+      # ohne dass vLLM es aus dem Netz zieht
+      - ~/git/gameprototype/cache:/root/.cache
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    # laeuft idle; llm.VLLM.load() startet 'vllm serve <modell>' per exec
+    command: ["sleep", "infinity"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
