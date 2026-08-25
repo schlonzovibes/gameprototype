@@ -17,7 +17,25 @@ services:
       OLLAMA_URL: http://host.docker.internal:11434
       # Sprach- UND Bildmodelle liegen im selben HF-Cache (/root/.cache);
       # models.py findet ihn ohne weitere Konfiguration.
-      AIGAME_NUM_CTX: 24576
+
+      # Kontextfenster. ~6500 System-Prompt + 12 Zuege Verlauf + Antwort
+      # sprengen die frueheren 24576 gegen Ende einer Geschichte.
+      AIGAME_NUM_CTX: 40960
+      # Antwortlaenge. Im Thinking-Modus muessen Denkprozess UND das
+      # vollstaendige Szenen-JSON hineinpassen - mit 2048 wurde das JSON
+      # abgeschnitten. Betrifft nur vLLM, nicht Ollama.
+      AIGAME_MAX_TOKENS: 4096
+      # Anteil des gemeinsamen Speichers fuer vLLM (Gewichte + KV-Cache).
+      # 0.78 von 128 GB sind rund 100 GB; der Rest bleibt fuers Bildmodell,
+      # das danach geladen wird. Hochsetzen, wenn vLLM beim KV-Cache
+      # abbricht - runter, wenn danach FLUX nicht mehr passt.
+      AIGAME_VLLM_GPU_UTIL: "0.78"
+      # Zusaetzliche Flags fuer 'vllm serve'. Prefix-Caching spart den
+      # Prefill des ~6500-Token-System-Prompts in JEDER Runde.
+      # Weigert sich vLLM zu starten ("unrecognized arguments"), kennt diese
+      # Version das Flag nicht -> hier auf "" setzen. Die Ursache steht dann
+      # sofort in der Fehlermeldung des Spiels.
+      AIGAME_VLLM_ARGS: "--enable-prefix-caching"
       AIGAME_THINK: "1"
       TERM: ${TERM:-xterm-256color}
       TERM_PROGRAM: ${TERM_PROGRAM:-}

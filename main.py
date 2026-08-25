@@ -38,7 +38,9 @@ Minuten dauert und die Geschichte davon unabhaengig ist.
     /restart   zurueck zum Titelbildschirm, neue Geschichte
     unload     Sprachmodell freigeben, Programm laeuft weiter - damit man
                in der Fusszeile zusehen kann, ob der Speicher zurueckkommt
-    Strg+C     Programm beenden (gibt das Modell dabei ebenfalls frei)
+    Strg+C     Programm beenden. Das Modell bleibt dabei ABSICHTLICH
+               geladen: der naechste Start ist dadurch sofort da. Wer den
+               Speicher zurueck will, tippt vorher "unload".
 
 Start:  python3 main.py
 """
@@ -173,23 +175,35 @@ def render(image, narration: str) -> None:
 
     Die Leerzeile Abstand ZUR KOPFZEILE (oberhalb von art) liefert schon
     ui.clear_body() - deshalb kein fuehrendes "\\n" mehr im write() unten.
+
+    Der Erzaehltext bricht auf der BILDBREITE um, nicht auf einer festen
+    Spaltenzahl: beide Bloecke enden dadurch buendig an derselben Kante.
     """
     ui.clear_body()
     width, height = ui.size()
 
     art = ""
+    text_width = TEXT_WIDTH   # Rueckfall fuer Szenen ohne Bild
     if image is not None:
-        art = termimage.render(
-            image,
-            # max/min klemmen die Werte: nie breiter als VIEWPORT_COLS, nie
-            # breiter als das Fenster minus Rand, und nie kleiner als 1.
-            max(1, min(VIEWPORT_COLS, width - 2 * MARGIN)),
-            max(4, height - TEXT_ROWS),
-            MARGIN,
-        )
+        # max/min klemmen die Werte: nie breiter als VIEWPORT_COLS, nie
+        # breiter als das Fenster minus Rand, und nie kleiner als 1.
+        max_cols = max(1, min(VIEWPORT_COLS, width - 2 * MARGIN))
+        max_rows = max(4, height - TEXT_ROWS)
+
+        # fit() liefert die Masse, die das Bild WIRKLICH bekommt. Bei
+        # niedrigem Terminal begrenzt die Hoehe, und die Breite schrumpft
+        # mit, damit das Seitenverhaeltnis stimmt - max_cols waere dann zu
+        # optimistisch und der Text ragte ueber das Bild hinaus.
+        cols, _ = termimage.fit(image, max_cols, max_rows)
+        art = termimage.render(image, max_cols, max_rows, MARGIN)
+
+        # textwrap rechnet die Einrueckung in die Breite mit ein, das Bild
+        # steht zusaetzlich um MARGIN eingerueckt - daher die Summe, damit
+        # beide an derselben Spalte enden.
+        text_width = MARGIN + cols
 
     # " " * MARGIN erzeugt die Einrueckung als Leerzeichen-String.
-    ui.write(f"{art}\n{ui.wrap(narration, TEXT_WIDTH, ' ' * MARGIN)}\n\n")
+    ui.write(f"{art}\n{ui.wrap(narration, text_width, ' ' * MARGIN)}\n\n")
 
 
 def paint(painter: diffusion.Diffusion, visual: str):
@@ -315,11 +329,6 @@ def main() -> None:
     ui.clear()
     frame = ui.Frame(TITLE).start()
 
-    # None, bis pick_models() zurueckkommt: schlaegt das Laden selbst fehl
-    # (sys.exit in pick_models), gibt es noch kein Modell zum Entladen -
-    # der finally-Block unten prueft das ab.
-    engine = None
-
     try:
         engine, painter = pick_models(frame)
         # Die Schleife laeuft, solange run_story() True liefert. Der Rumpf
@@ -329,34 +338,21 @@ def main() -> None:
     except KeyboardInterrupt:
         pass       # Strg+C ist ein normaler Weg zu gehen, kein Fehler
     finally:
-        # finally laeuft IMMER: bei return, bei Strg+C, bei jedem Fehler
-        # (auch bei sys.exit() aus pick_models und beim SystemExit, das
-        # ui.ask()/ui.select() fuer 'q'/Strg+C/Strg+D werfen). Deshalb steht
-        # engine.unload() hier und nicht an einem einzelnen Ausstiegsweg:
-        # bei JEDEM Programmende soll der Speicher zurueckkommen.
+        # Hier wird BEWUSST nicht entladen. Das Sprachmodell freizugeben ist
+        # eine ausdrueckliche Entscheidung des Spielers ("unload"), kein
+        # Nebeneffekt des Beendens.
         #
-        # Der "unload"-Befehl ist davon unabhaengig - er dient dem Zusehen
-        # waehrend das Programm laeuft. Hat der Spieler ihn schon benutzt,
-        # ist dieser Aufruf ein harmloser Leerlauf: es gibt dann keinen
-        # Prozess mehr zu beenden.
-        freed = True
-        if engine is not None:
-            with ui.Status("unloading model", indent=ui.INDENT):
-                freed = engine.unload()
-        # Ohne das bliebe die Scroll-Region gesetzt und das Terminal waere
-        # nach dem Spiel kaputt.
+        # Das hat auch einen praktischen Vorteil: laeuft vLLM weiter, ist der
+        # naechste Programmstart sofort da - VLLM.load() sieht das Modell in
+        # /v1/models und kehrt direkt zurueck, statt es minutenlang neu zu
+        # laden. Wer den Speicher wirklich zurueck will, tippt vorher
+        # "unload" und sieht in der Fusszeile zu.
+        #
+        # Aufgeraeumt wird hier nur das Terminal - ohne das bliebe die
+        # Scroll-Region gesetzt und die Shell danach unbrauchbar.
         frame.stop()
         ui.show_cursor()
         ui.write("\n")
-
-        # Erst NACH frame.stop(): der Rahmen haelt sonst die letzte Zeile
-        # besetzt und ueberschreibt die Meldung eine Sekunde spaeter wieder.
-        if not freed:
-            ui.write(ui.wrap(
-                "Warning: vLLM may still be holding GPU memory. Check with "
-                "'nvidia-smi'; if needed: "
-                f"docker exec {llm.VLLM.CONTAINER} pkill -KILL -f 'vllm'",
-                indent=" " * MARGIN) + "\n\n")
 
 
 # Dieser Block laeuft nur, wenn die Datei direkt gestartet wird
