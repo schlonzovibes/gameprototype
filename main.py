@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """RePlot - Terminal-Runner.
 
@@ -52,15 +51,16 @@ import ui
 TITLE = "RePlot"
 TITLE_FILE = Path(__file__).resolve().parent / "title_screen.txt"
 
-VIEWPORT_COLS = 80   # max. Bildbreite in Zellen - breiter wirkt es zerlaufen
-TEXT_ROWS = 12       # Reserve: Kopf- und Fusszeile, Erzaehltext, Eingabe
-TEXT_WIDTH = 72      # Umbruchbreite des Erzaehltexts
-MARGIN = 2           # Einrueckung links
+VIEWPORT_COLS = 80  # max. Bildbreite in Zellen - breiter wirkt es zerlaufen
+TEXT_ROWS = 12  # Reserve: Kopf- und Fusszeile, Erzaehltext, Eingabe
+TEXT_WIDTH = 72  # Umbruchbreite des Erzaehltexts
+MARGIN = 2  # Einrueckung links
 
 RESTART = "/restart"
 
 
 # ------------------------------------------------------------------ Setup
+
 
 def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
     """Backend, Sprachmodell, Bildmodell - nur einmal pro Sitzung.
@@ -74,9 +74,12 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
 
     # ui.select() gibt einen Index zurueck (0 oder 1). Das Tupel davor wird
     # damit indiziert: ("ollama", "vllm")[0] ergibt "ollama".
-    backend = ("ollama", "vllm")[ui.select(
-        "Inference backend",
-        [f"ollama   {models.OLLAMA_URL}", f"vllm     {models.VLLM_URL}"])]
+    backend = ("ollama", "vllm")[
+        ui.select(
+            "Inference backend",
+            [f"ollama   {models.OLLAMA_URL}", f"vllm     {models.VLLM_URL}"],
+        )
+    ]
 
     # indent=ui.INDENT: waehrend Backend/Modell-Auswahl steht auch der
     # Spinner buendig mit "RePlot" und "RAM", nicht am linken Rand wie der
@@ -85,11 +88,10 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
         # Hier wird die FUNKTION ausgewaehlt (ohne Klammern), und erst das
         # "()" ganz am Ende ruft die gewaehlte auf. Sonst wuerden beide
         # laufen, obwohl nur eine gebraucht wird.
-        found = (models.ollama_models if backend == "ollama"
-                 else models.vllm_models)()
+        found = (models.ollama_models if backend == "ollama" else models.vllm_models)()
 
     if not found:
-        sys.exit(_no_models(backend))   # beendet das Programm mit Meldung
+        sys.exit(_no_models(backend))  # beendet das Programm mit Meldung
 
     choice = found[ui.select("Language model", [m.label for m in found])]
     engine = llm.build(choice)
@@ -123,13 +125,18 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
 def _no_models(backend: str) -> str:
     """Eine Fehlermeldung, die auch sagt, was zu tun ist."""
     if backend == "ollama":
-        return (f"No models reported by Ollama at {models.OLLAMA_URL}. "
-                "Is it running with OLLAMA_HOST=0.0.0.0?")
-    return (f"No language models in {models.cache_root() or 'the HF cache'}. "
-            "Set AIGAME_CACHE if it lives elsewhere.")
+        return (
+            f"No models reported by Ollama at {models.OLLAMA_URL}. "
+            "Is it running with OLLAMA_HOST=0.0.0.0?"
+        )
+    return (
+        f"No language models in {models.cache_root() or 'the HF cache'}. "
+        "Set AIGAME_CACHE if it lives elsewhere."
+    )
 
 
 # ------------------------------------------------------------------ Render
+
 
 def show_title() -> None:
     """ASCII-Titel vor der ersten Eingabe. Fehlt die Datei: ueberspringen.
@@ -137,16 +144,19 @@ def show_title() -> None:
     Bewusst kein Fehler, wenn title_screen.txt fehlt - eine fehlende
     Zierde soll niemanden am Spielen hindern.
 
-    Eine Leerzeile Abstand zur Kopfzeile, genau wie render() sie vor dem
-    Szenenbild laesst - und dieselbe Einrueckung wie Bild und Erzaehltext
-    (" " * MARGIN), statt am linken Rand zu kleben wie bisher.
+    Die Leerzeile Abstand zur Kopfzeile liefert schon ui.clear_body() (der
+    Aufrufer raeumt davor immer damit auf) - hier nur noch dieselbe
+    Einrueckung wie Bild und Erzaehltext (" " * MARGIN), statt am linken
+    Rand zu kleben wie urspruenglich.
     """
     if not TITLE_FILE.exists():
         return
     indent = " " * MARGIN
-    art = "\n".join(indent + line for line in
-                    TITLE_FILE.read_text(encoding="utf-8").rstrip().splitlines())
-    ui.write(f"\n{ui.GRAY}{art}{ui.RESET}\n")
+    art = "\n".join(
+        indent + line
+        for line in TITLE_FILE.read_text(encoding="utf-8").rstrip().splitlines()
+    )
+    ui.write(f"{ui.GRAY}{art}{ui.RESET}\n")
 
 
 def render(image, narration: str) -> None:
@@ -157,6 +167,9 @@ def render(image, narration: str) -> None:
     Anschluss zeichnet (ask_turn() -> ui.ask()), uebernimmt jetzt selbst die
     Rolle des Abschlusses. Eine Leerzeile Abstand bleibt trotzdem, damit
     Text und Prompt nicht aneinander kleben.
+
+    Die Leerzeile Abstand ZUR KOPFZEILE (oberhalb von art) liefert schon
+    ui.clear_body() - deshalb kein fuehrendes "\\n" mehr im write() unten.
     """
     ui.clear_body()
     width, height = ui.size()
@@ -173,7 +186,7 @@ def render(image, narration: str) -> None:
         )
 
     # " " * MARGIN erzeugt die Einrueckung als Leerzeichen-String.
-    ui.write(f"\n{art}\n{ui.wrap(narration, TEXT_WIDTH, ' ' * MARGIN)}\n\n")
+    ui.write(f"{art}\n{ui.wrap(narration, TEXT_WIDTH, ' ' * MARGIN)}\n\n")
 
 
 def paint(painter: diffusion.Diffusion, visual: str):
@@ -194,6 +207,7 @@ def paint(painter: diffusion.Diffusion, visual: str):
 
 # ------------------------------------------------------------------ Story
 
+
 def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame) -> bool:
     """Ein kompletter Durchlauf. Rueckgabe True: noch eine Geschichte starten.
 
@@ -201,13 +215,13 @@ def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame) ->
     wird hier nur benutzt, nicht erzeugt oder gestoppt - das macht main().
     """
     ui.clear_body()
-    frame.reset_scene()   # "Szene 15/15" der letzten Geschichte ausblenden
+    frame.reset_scene()  # "Szene 15/15" der letzten Geschichte ausblenden
     show_title()
     ui.write(f"\n{ui.GRAY} REPLOT YOUR STORY:{ui.RESET}\n")
     start_prompt = ui.ask()
 
     tale = story.Story(engine, start_prompt)
-    turn = tale.first_turn   # der erste "Zug" kommt vom Programm, nicht vom Spieler
+    turn = tale.first_turn  # der erste "Zug" kommt vom Programm, nicht vom Spieler
 
     try:
         while True:
@@ -220,16 +234,17 @@ def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame) ->
                 ui.write("\n" + ui.wrap(str(e), TEXT_WIDTH, " " * MARGIN) + "\n\n")
                 turn = ask_turn()
                 if turn is None:
-                    return True     # /restart
-                continue            # zurueck an den Schleifenanfang
+                    return True  # /restart
+                continue  # zurueck an den Schleifenanfang
 
             frame.update(scene.number, scene.max_scenes)
             # Von innen nach aussen gelesen: erst malen, dann anzeigen.
             render(paint(painter, scene.visual), scene.narration)
 
             if scene.completed:
-                ui.write(ui.wrap("The journey has ended.", TEXT_WIDTH,
-                                 " " * MARGIN) + "\n\n")
+                ui.write(
+                    ui.wrap("The journey has ended.", TEXT_WIDTH, " " * MARGIN) + "\n\n"
+                )
                 # "== 0" macht aus dem Index ein True/False: 0 ist
                 # "start a new story", also weitermachen.
                 return ui.select("What next?", ["start a new story", "quit"]) == 0
@@ -253,6 +268,7 @@ def ask_turn() -> str | None:
 
 # ------------------------------------------------------------------ Loop
 
+
 def main() -> None:
     # isatty() = "haengt hier ein echtes Terminal dran?". Bei "python main.py
     # < datei.txt" waere das nein - und ohne Terminal gibt es keine
@@ -273,9 +289,9 @@ def main() -> None:
         # Die Schleife laeuft, solange run_story() True liefert. Der Rumpf
         # ist leer - die ganze Arbeit steckt in der Bedingung.
         while run_story(engine, painter, frame):
-            pass   # Neustart: gleiche Modelle, neue Geschichte
+            pass  # Neustart: gleiche Modelle, neue Geschichte
     except KeyboardInterrupt:
-        pass       # Strg+C ist ein normaler Weg zu gehen, kein Fehler
+        pass  # Strg+C ist ein normaler Weg zu gehen, kein Fehler
     finally:
         # finally laeuft IMMER: bei return, bei Strg+C, bei jedem Fehler
         # (auch bei sys.exit() aus pick_models - SystemExit zaehlt hier mit).

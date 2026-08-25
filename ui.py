@@ -1,4 +1,3 @@
-
 """Terminal-Ausgabe. Einziger Besitzer von stdout.
 
 === Warum dieses Modul der einzige Schreiber ist ===
@@ -46,28 +45,28 @@ __exit__), Klassen mit Konstanten, und Signal-Handler.
 
 from __future__ import annotations
 
-import shutil      # shutil.get_terminal_size() - wie gross ist das Fenster?
-import signal      # Betriebssystem-Signale, hier: "Fenster wurde skaliert"
-import sys         # sys.stdout / sys.stdin - die Standard-Ein-/Ausgabe
-import termios     # Terminal-Einstellungen aendern (nur Linux/macOS!)
-import textwrap    # Text auf eine Breite umbrechen
-import threading   # Nebenlaeufigkeit: mehrere Dinge gleichzeitig
-import tty         # Terminal in den "Raw"-Modus schalten (nur Linux/macOS!)
+import shutil  # shutil.get_terminal_size() - wie gross ist das Fenster?
+import signal  # Betriebssystem-Signale, hier: "Fenster wurde skaliert"
+import sys  # sys.stdout / sys.stdin - die Standard-Ein-/Ausgabe
+import termios  # Terminal-Einstellungen aendern (nur Linux/macOS!)
+import textwrap  # Text auf eine Breite umbrechen
+import threading  # Nebenlaeufigkeit: mehrere Dinge gleichzeitig
+import tty  # Terminal in den "Raw"-Modus schalten (nur Linux/macOS!)
 
 import gpu
 
 # ACHTUNG: termios und tty gibt es unter Windows nicht. Dieses Programm laeuft
 # im Linux-Container, deshalb ist das in Ordnung.
 
-ESC = "\x1b"                      # das ESC-Zeichen, Start jeder Sequenz
-RESET = "\x1b[0m"                 # Farben/Effekte zuruecksetzen
-INV = "\x1b[7m"                   # invers - markiert den gewaehlten Eintrag
-GRAY = "\x1b[38;2;140;140;140m"   # definiertes Mittelgrau als echtes RGB.
-                                  # Besser als \x1b[2m ("dim"), weil das je
-                                  # nach Terminal-Theme voellig anders aussieht.
-DARK_GRAY = "\x1b[38;2;80;80;80m" # dunkler als GRAY - fuer die Fusszeile,
-                                  # die bewusst mehr zuruecktritt als der Kopf
-MARKER = "▸"                      # Pfeil vor dem gewaehlten Eintrag
+ESC = "\x1b"  # das ESC-Zeichen, Start jeder Sequenz
+RESET = "\x1b[0m"  # Farben/Effekte zuruecksetzen
+INV = "\x1b[7m"  # invers - markiert den gewaehlten Eintrag
+GRAY = "\x1b[38;2;140;140;140m"  # definiertes Mittelgrau als echtes RGB.
+# Besser als \x1b[2m ("dim"), weil das je
+# nach Terminal-Theme voellig anders aussieht.
+DARK_GRAY = "\x1b[38;2;80;80;80m"  # dunkler als GRAY - fuer die Fusszeile,
+# die bewusst mehr zuruecktritt als der Kopf
+MARKER = "▸"  # Pfeil vor dem gewaehlten Eintrag
 
 # Der linke Rand, den JEDER Bildschirm dieses Spiels teilt: Kopfzeile
 # ("RePlot"), Fusszeile ("RAM"), Auswahlmenues und Statuszeilen beginnen
@@ -123,6 +122,13 @@ def clear() -> None:
 def clear_body() -> None:
     """Nur die Scroll-Region leeren - Kopf- und Fusszeile bleiben stehen.
 
+    Der Cursor landet danach NICHT in Zeile 2, sondern in Zeile 3: Zeile 2
+    bleibt als Abstand zur Kopfzeile leer. Diese eine Stelle setzt die Regel
+    fuer jeden Bildschirmwechsel durch - kein Aufrufer muss mehr selbst an
+    die fuehrende Leerzeile denken (und keiner kann sie mehr vergessen, so
+    wie es bei der Backend- und Bildmodell-Auswahl passiert war, die direkt
+    unter der Kopfzeile ohne jeden Abstand begannen).
+
     Warum umstaendlich zeilenweise statt einfach mit \\x1b[J? Weil \\x1b[J
     "loesche ab hier bis zum Bildschirmende" bedeutet - das wuerde die
     Fusszeile mitnehmen. Sie kaeme zwar eine Sekunde spaeter zurueck, aber
@@ -132,8 +138,13 @@ def clear_body() -> None:
     # das obere Ende von range gehoert nie dazu, daher das "+ 1".
     # "".join(...) klebt alle erzeugten Stuecke zu einem String zusammen;
     # so geht alles in einem einzigen write() raus statt in vielen.
-    write("".join(f"\x1b[{row};1H\x1b[2K" for row in range(2, _bottom() + 1))
-          + "\x1b[2;1H")   # danach den Cursor an den Anfang der Region
+    # min(3, _bottom()): bei einem winzigen Fenster (_bottom() == 2) ist
+    # kein Platz fuer die Leerzeile - dann eben ohne, statt eine Region zu
+    # verlassen, die es gar nicht gibt.
+    write(
+        "".join(f"\x1b[{row};1H\x1b[2K" for row in range(2, _bottom() + 1))
+        + f"\x1b[{min(3, _bottom())};1H"
+    )
 
 
 def wrap(text: str, width: int | None = None, indent: str = "") -> str:
@@ -149,15 +160,22 @@ def wrap(text: str, width: int | None = None, indent: str = "") -> str:
 
     out = []
     for para in text.strip().split("\n"):
-        if not para.strip():      # leere Zeile = Absatzgrenze, so belassen
+        if not para.strip():  # leere Zeile = Absatzgrenze, so belassen
             out.append("")
-            continue              # continue springt zum naechsten Durchlauf
-        out.append(textwrap.fill(para.strip(), width=width,
-                                 initial_indent=indent, subsequent_indent=indent))
+            continue  # continue springt zum naechsten Durchlauf
+        out.append(
+            textwrap.fill(
+                para.strip(),
+                width=width,
+                initial_indent=indent,
+                subsequent_indent=indent,
+            )
+        )
     return "\n".join(out)
 
 
 # ------------------------------------------------------------------ Rahmen
+
 
 def _bottom() -> int:
     """Letzte Zeile der Scroll-Region - darunter liegt die Fusszeile.
@@ -201,8 +219,8 @@ def _join(parts: list[str], width: int) -> str:
         # Beim ersten Feld kein Trenner davor, danach schon.
         candidate = f"{line} · {part}" if line else part
         if len(candidate) > width:
-            break          # break verlaesst die Schleife ganz
-        line = candidate   # passt - uebernehmen und weiter probieren
+            break  # break verlaesst die Schleife ganz
+        line = candidate  # passt - uebernehmen und weiter probieren
     return line
 
 
@@ -241,8 +259,8 @@ class Frame:
 
     # Variablen direkt in der Klasse (nicht in __init__) sind Konstanten, die
     # sich alle Objekte dieser Klasse teilen. Zugriff ueber self.BAR.
-    BAR = 16                    # Breite der Balken in Zeichen
-    FULL, EMPTY = "█", "░"      # gefuelltes / leeres Balkensegment
+    BAR = 16  # Breite der Balken in Zeichen
+    FULL, EMPTY = "█", "░"  # gefuelltes / leeres Balkensegment
 
     def __init__(self, title: str):
         """__init__ ist der Konstruktor - laeuft bei Frame(...) automatisch.
@@ -317,14 +335,14 @@ class Frame:
         Spielende, und das finally stoppt sicherheitshalber noch einmal.
         """
         if self._thread is None:
-            return   # schon gestoppt - nichts mehr zu tun
+            return  # schon gestoppt - nichts mehr zu tun
 
-        self._stop.set()        # Schalter umlegen: der Thread soll aufhoeren
-        self._thread.join()     # warten, bis er wirklich fertig ist
-        self._thread = None     # merken, dass gestoppt wurde
+        self._stop.set()  # Schalter umlegen: der Thread soll aufhoeren
+        self._thread.join()  # warten, bis er wirklich fertig ist
+        self._thread = None  # merken, dass gestoppt wurde
 
-        signal.signal(signal.SIGWINCH, signal.SIG_DFL)   # Handler abmelden
-        _set_region(False)                               # Region aufheben
+        signal.signal(signal.SIGWINCH, signal.SIG_DFL)  # Handler abmelden
+        _set_region(False)  # Region aufheben
 
     def draw(self) -> None:
         """Kopfzeile, Trennzeile und Fusszeile neu malen.
@@ -338,11 +356,13 @@ class Frame:
         # - und eine halb getippte Eingabe - voellig unberuehrt.
         # Alles in EINEM write(), damit kein anderer Thread dazwischenfunkt.
         # Die Fusszeile ist bewusst dunkler als der Kopf - sie tritt zurueck.
-        write("\x1b7"
-              + self._paint(1, self._header(), GRAY)               # Zeile 1
-              + self._blank(size()[1] - 1)                         # Trennzeile
-              + self._paint(size()[1], self._footer(), DARK_GRAY)  # letzte Zeile
-              + "\x1b8")
+        write(
+            "\x1b7"
+            + self._paint(1, self._header(), GRAY)  # Zeile 1
+            + self._blank(size()[1] - 1)  # Trennzeile
+            + self._paint(size()[1], self._footer(), DARK_GRAY)  # letzte Zeile
+            + "\x1b8"
+        )
 
     def _paint(self, row: int, text: str, color: str) -> str:
         """Eine Zeile ansteuern, leeren und in der gegebenen Farbe beschriften."""
@@ -389,7 +409,7 @@ class Frame:
 
         # Der Titel darf notfalls abgeschnitten werden - ein Balken nicht.
         # "or" springt ein, wenn _join() bei sehr schmalem Fenster "" liefert.
-        return _join(parts, self._width()) or self.title[:self._width()]
+        return _join(parts, self._width()) or self.title[: self._width()]
 
     def _footer(self) -> str:
         """Letzte Zeile: RAM ███░░░ 46GB · GPU █████░ 62%
@@ -408,11 +428,10 @@ class Frame:
         ram = gpu.ram_stats()
         if ram:
             used, total_mb = ram
-            if total_mb:   # Schutz gegen Division durch 0
+            if total_mb:  # Schutz gegen Division durch 0
                 # round() statt Abschneiden: 1500 MB soll "2GB" ergeben,
                 # nicht truegerisch abgerundet "1GB".
-                parts.append(f"RAM {self._bar(used / total_mb)} "
-                             f"{round(used / 1024)}GB")
+                parts.append(f"RAM {self._bar(used / total_mb)} {round(used / 1024)}GB")
 
         util = gpu.gpu_util()
         if util is not None:
@@ -424,6 +443,7 @@ class Frame:
 
 
 # ------------------------------------------------------------------ Eingabe
+
 
 class _Raw:
     """Terminal fuer die Dauer des Blocks in den Raw-Modus schalten.
@@ -439,15 +459,15 @@ class _Raw:
     """
 
     def __enter__(self):
-        self.fd = sys.stdin.fileno()               # Nummer des Eingabekanals
-        self.old = termios.tcgetattr(self.fd)      # alte Einstellungen merken
-        tty.setraw(self.fd)                        # umschalten
+        self.fd = sys.stdin.fileno()  # Nummer des Eingabekanals
+        self.old = termios.tcgetattr(self.fd)  # alte Einstellungen merken
+        tty.setraw(self.fd)  # umschalten
         return self
 
     def __exit__(self, *exc):
         # *exc schluckt die drei Argumente, die Python hier uebergibt
         # (Fehlerart, Fehler, Stacktrace) - wir brauchen sie nicht.
-        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)   # zurueck
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)  # zurueck
 
 
 def _key() -> str:
@@ -459,9 +479,9 @@ def _key() -> str:
     """
     ch = sys.stdin.read(1)
     if ch != ESC:
-        return ch          # normale Taste - direkt zurueck
+        return ch  # normale Taste - direkt zurueck
     if sys.stdin.read(1) != "[":
-        return ESC         # ESC alleine gedrueckt
+        return ESC  # ESC alleine gedrueckt
     # dict.get(schluessel, default) liefert den Default statt eines Fehlers,
     # wenn der Schluessel fehlt - hier bei Pfeil links/rechts ein leerer String.
     return {"A": "up", "B": "down"}.get(sys.stdin.read(1), "")
@@ -491,16 +511,18 @@ def select(title: str, labels: list[str]) -> int:
     # Zu lange Eintraege kuerzen und mit "…" markieren, damit die Liste nicht
     # umbricht - ein Umbruch wuerde die Cursor-Rechnung unten zerstoeren.
     width = cols() - 6
-    view = [l if len(l) <= width else l[:width - 1] + "…" for l in labels]
+    view = [l if len(l) <= width else l[: width - 1] + "…" for l in labels]
 
     # Erst Titel und Hilfezeile, dann pro Eintrag eine Leerzeile. Die brauchen
     # wir, damit der Cursor gleich um genau so viele Zeilen hochspringen kann.
     # Beide Zeilen mit INDENT, damit sie mit dem Marker der Liste fluchten -
     # und mit Kopf- und Fusszeile des Rahmens.
-    write(f"{INDENT}{title}\n{INDENT}{GRAY}↑/↓ select · Enter confirm · q quit"
-          f"{RESET}\n\n" + "\n" * len(view))
+    write(
+        f"{INDENT}{title}\n{INDENT}{GRAY}↑/↓ select · Enter confirm · q quit"
+        f"{RESET}\n\n" + "\n" * len(view)
+    )
 
-    idx = 0   # welcher Eintrag ist gerade markiert
+    idx = 0  # welcher Eintrag ist gerade markiert
     hide_cursor()
     try:
         with _Raw():
@@ -511,9 +533,13 @@ def select(title: str, labels: list[str]) -> int:
                 # \r\n statt \n: im Raw-Modus bewegt \n nur nach unten, der
                 # Wagenruecklauf \r an den Zeilenanfang muss dazu.
                 # enumerate() liefert Position UND Wert: (0, "erster"), ...
-                write(f"\x1b[{len(view)}A" + "".join(
-                    "\x1b[2K" + _row(label, i == idx) + "\r\n"
-                    for i, label in enumerate(view)))
+                write(
+                    f"\x1b[{len(view)}A"
+                    + "".join(
+                        "\x1b[2K" + _row(label, i == idx) + "\r\n"
+                        for i, label in enumerate(view)
+                    )
+                )
 
                 key = _key()
                 if key == "up":
@@ -522,9 +548,9 @@ def select(title: str, labels: list[str]) -> int:
                     idx = (idx - 1) % len(view)
                 elif key == "down":
                     idx = (idx + 1) % len(view)
-                elif key in ("\r", "\n"):        # Enter
+                elif key in ("\r", "\n"):  # Enter
                     return idx
-                elif key in ("q", "\x03", "\x04"):   # q, Strg+C, Strg+D
+                elif key in ("q", "\x03", "\x04"):  # q, Strg+C, Strg+D
                     raise SystemExit(0)
     finally:
         # finally laeuft immer - auch bei return oder SystemExit. Ohne das
@@ -547,11 +573,11 @@ def ask(caret: str = "›") -> str:
 
     while True:
         try:
-            value = input(f"{caret} ").strip()   # strip() = Leerraum abschneiden
+            value = input(f"{caret} ").strip()  # strip() = Leerraum abschneiden
         except (EOFError, KeyboardInterrupt):
             # Strg+D bzw. Strg+C - das Programm sauber beenden.
             raise SystemExit(0)
-        if value:            # leerer String ist "falsch" -> nochmal fragen
+        if value:  # leerer String ist "falsch" -> nochmal fragen
             return value
 
 
@@ -585,14 +611,14 @@ class Status:
     Kopf- und Fusszeile fluchtet.
     """
 
-    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"   # Braille-Zeichen, ergeben ein drehendes Muster
+    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"  # Braille-Zeichen, ergeben ein drehendes Muster
     BAR = 20
     FULL, EMPTY = "█", "░"
 
     def __init__(self, label: str, indent: str = ""):
         self.label = label
         self.indent = indent
-        self.fraction: float | None = None   # None = kein Balken
+        self.fraction: float | None = None  # None = kein Balken
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -625,7 +651,7 @@ class Status:
             out += f"  {bar} {self.fraction * 100:3.0f}%"
         # Kuerzen, damit die Zeile nie umbricht - ein Umbruch wuerde die
         # \r-Technik unten zerstoeren und Reste stehen lassen.
-        return out[:cols() - 1]
+        return out[: cols() - 1]
 
     def _run(self):
         hide_cursor()
@@ -635,14 +661,15 @@ class Status:
             # Zeile - so wird immer dieselbe Zeile ueberschrieben, statt den
             # Bildschirm mit Spinner-Zeilen vollzuschreiben.
             # i % len(FRAMES) laeuft endlos im Kreis durch die Zeichen.
-            write(f"\r\x1b[2K{GRAY}{self._text(self.FRAMES[i % len(self.FRAMES)])}"
-                  f"{RESET}")
+            write(
+                f"\r\x1b[2K{GRAY}{self._text(self.FRAMES[i % len(self.FRAMES)])}{RESET}"
+            )
             i += 1
-            self._stop.wait(0.08)   # ~12 Bilder pro Sekunde
+            self._stop.wait(0.08)  # ~12 Bilder pro Sekunde
 
     def __exit__(self, *exc):
         self._stop.set()
         if self._thread:
             self._thread.join()
-        write("\r\x1b[2K")   # Spinner-Zeile hinterlassen wir sauber
+        write("\r\x1b[2K")  # Spinner-Zeile hinterlassen wir sauber
         show_cursor()
