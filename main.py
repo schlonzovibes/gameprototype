@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """RePlot - Terminal-Runner.
 
@@ -77,7 +78,10 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
         "Inference backend",
         [f"ollama   {models.OLLAMA_URL}", f"vllm     {models.VLLM_URL}"])]
 
-    with ui.Status(f"searching {backend} models"):
+    # indent=ui.INDENT: waehrend Backend/Modell-Auswahl steht auch der
+    # Spinner buendig mit "RePlot" und "RAM", nicht am linken Rand wie der
+    # Spinner spaeter im Spiel (der bewusst unter der "›"-Eingabe bleibt).
+    with ui.Status(f"searching {backend} models", indent=ui.INDENT):
         # Hier wird die FUNKTION ausgewaehlt (ohne Klammern), und erst das
         # "()" ganz am Ende ruft die gewaehlte auf. Sonst wuerden beide
         # laufen, obwohl nur eine gebraucht wird.
@@ -96,11 +100,11 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
 
     # status.update wird als Rueckruf durchgereicht: vLLM meldet damit den
     # Shard-Fortschritt in die Statuszeile. Ollama nutzt es nicht.
-    with ui.Status(f"loading {choice.ref}") as status:
+    with ui.Status(f"loading {choice.ref}", indent=ui.INDENT) as status:
         engine.load(status.update)
 
     ui.clear_body()
-    with ui.Status("searching image models"):
+    with ui.Status("searching image models", indent=ui.INDENT):
         images = models.image_models()
     if not images:
         # "a or b" auch hier als Rueckfallebene: gibt es gar keinen
@@ -110,7 +114,7 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
     picked = images[ui.select("Image model", [m.label for m in images])]
     painter = diffusion.Diffusion(picked)
     # Das Label ist "name · groesse"; split(SEP)[0] holt nur den Namen.
-    with ui.Status(f"loading {picked.label.split(models.SEP)[0]}"):
+    with ui.Status(f"loading {picked.label.split(models.SEP)[0]}", indent=ui.INDENT):
         painter.load()
 
     return engine, painter
@@ -132,14 +136,28 @@ def show_title() -> None:
 
     Bewusst kein Fehler, wenn title_screen.txt fehlt - eine fehlende
     Zierde soll niemanden am Spielen hindern.
+
+    Eine Leerzeile Abstand zur Kopfzeile, genau wie render() sie vor dem
+    Szenenbild laesst - und dieselbe Einrueckung wie Bild und Erzaehltext
+    (" " * MARGIN), statt am linken Rand zu kleben wie bisher.
     """
-    if TITLE_FILE.exists():
-        ui.write(ui.GRAY + TITLE_FILE.read_text(encoding="utf-8").rstrip()
-                 + ui.RESET + "\n")
+    if not TITLE_FILE.exists():
+        return
+    indent = " " * MARGIN
+    art = "\n".join(indent + line for line in
+                    TITLE_FILE.read_text(encoding="utf-8").rstrip().splitlines())
+    ui.write(f"\n{ui.GRAY}{art}{ui.RESET}\n")
 
 
 def render(image, narration: str) -> None:
-    """Szene in die Scroll-Region zwischen Kopf- und Fusszeile zeichnen."""
+    """Szene in die Scroll-Region zwischen Kopf- und Fusszeile zeichnen.
+
+    Frueher endete das hier mit einer Trennlinie (ui.rule()) unter dem
+    Erzaehltext. Die ist weg - die Eingabezeile, die der Aufrufer direkt im
+    Anschluss zeichnet (ask_turn() -> ui.ask()), uebernimmt jetzt selbst die
+    Rolle des Abschlusses. Eine Leerzeile Abstand bleibt trotzdem, damit
+    Text und Prompt nicht aneinander kleben.
+    """
     ui.clear_body()
     width, height = ui.size()
 
@@ -156,8 +174,6 @@ def render(image, narration: str) -> None:
 
     # " " * MARGIN erzeugt die Einrueckung als Leerzeichen-String.
     ui.write(f"\n{art}\n{ui.wrap(narration, TEXT_WIDTH, ' ' * MARGIN)}\n\n")
-    ui.rule()
-    ui.write("\n")
 
 
 def paint(painter: diffusion.Diffusion, visual: str):
@@ -275,4 +291,3 @@ def main() -> None:
 # Ohne ihn wuerde schon ein "import main" das ganze Spiel starten.
 if __name__ == "__main__":
     main()
-
