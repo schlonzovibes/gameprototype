@@ -564,7 +564,15 @@ def select(title: str, labels: list[str]) -> int:
 
 
 def ask(caret: str = "›") -> str:
-    """Eingabezeile. Leere Eingabe wird erneut abgefragt."""
+    """Eingabezeile. Leere Eingabe wird erneut abgefragt.
+
+    Bewusst OHNE Kenntnis von Spielbefehlen: was "unload" oder "/restart"
+    bedeutet, entscheidet main.py. Diese Funktion holt nur Text ab - sonst
+    muesste ui.py wissen, was ein Sprachmodell ist.
+
+    Einzige Ausnahme bleibt Strg+C/Strg+D, weil "Programm sofort beenden"
+    kein Spielbefehl ist, sondern eine Eigenschaft des Terminals.
+    """
     # Import mitten in der Funktion, nicht oben: allein durch das Importieren
     # klinkt sich readline in input() ein und ermoeglicht Pfeiltasten,
     # Zeilenbearbeitung und History. Benutzt wird es sonst nirgends - daher

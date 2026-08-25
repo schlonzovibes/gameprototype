@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import json
 import os
-import re                # regulaere Ausdruecke: Muster in Text suchen
-import shlex             # Argumente sicher fuer eine Shell-Zeile quoten
+import re  # regulaere Ausdruecke: Muster in Text suchen
+import shlex  # Argumente sicher fuer eine Shell-Zeile quoten
 import time
 import urllib.error
 import urllib.request
@@ -64,7 +64,7 @@ THINK = os.environ.get("AIGAME_THINK", "0").lower() in ("1", "true", "on", "yes"
 # und muss in den Rest passen. 0.78 laesst dafuer knapp 28 GB.
 VLLM_GPU_UTIL = os.environ.get("AIGAME_VLLM_GPU_UTIL", "0.78")
 
-MAX_SCENES = 15   # nur der Anzeige-Default, falls das Modell nichts meldet
+MAX_SCENES = 15  # nur der Anzeige-Default, falls das Modell nichts meldet
 
 # Suchmuster fuer pgrep/pkill, um den 'vllm serve'-Prozess zu finden.
 #
@@ -79,6 +79,24 @@ MAX_SCENES = 15   # nur der Anzeige-Default, falls das Modell nichts meldet
 # "vllm serve", steht als Text in der Kommandozeile aber anders da - die
 # Shell findet sich damit selbst nicht mehr. Ein klassischer Unix-Trick.
 _SELF_SAFE = "'vllm[ ]serve'"
+
+# Zum ENTLADEN reicht 'vllm serve' nicht: das ist nur der CLI-Einstieg.
+# vLLM startet daneben einen eigenen Engine-Prozess (bei Tensor-Paralle-
+# lismus mehrere Worker), und GENAU DIE halten den GPU-Speicher. Toetet man
+# nur den Einstiegsprozess, verschwindet der Server zwar aus /v1/models,
+# der Speicher bleibt aber belegt - und danach laesst sich kein Ollama mehr
+# laden. Die Kindprozesse heissen je nach vLLM-Version anders (etwa
+# "VLLM::EngineCore"), tragen aber alle "vllm" irgendwo in der Kommandozeile.
+#
+# -i macht die Suche gross-/kleinschreibungsunabhaengig, damit auch
+# "VLLM::EngineCore" getroffen wird. Die eckigen Klammern sind derselbe
+# Selbstschutz wie oben: die Shell, die pgrep ausfuehrt, traegt "vll[m]" in
+# ihrer eigenen Kommandozeile und findet sich damit nicht selbst.
+#
+# Gefahrlos breit, weil das alles im PID-Namespace des vLLM-CONTAINERS
+# laeuft - der sieht nur seine eigenen Prozesse. Das Bildmodell im
+# Spielcontainer kann nicht versehentlich mitgetroffen werden.
+_VLLM_ANY = "-i 'vll[m]'"
 
 # Dieser Text wird an game_prompt.txt angehaengt (siehe story.system_prompt).
 # Die dreifachen Anfuehrungszeichen erlauben mehrzeilige Strings.
@@ -113,12 +131,13 @@ _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 @dataclass(frozen=True)
 class Scene:
     """Das Ergebnis eines Zuges - aufgeraeumt und fertig zur Anzeige."""
-    narration: str    # deutscher Erzaehltext fuer den Bildschirm
-    visual: str       # englische Bildbeschreibung fuer das Bildmodell
-    raw: str          # das kanonische JSON, geht zurueck in den Chatverlauf
-    number: int       # welche Szene ist das (1-15)
-    max_scenes: int   # wie viele es insgesamt gibt
-    completed: bool   # ist die Geschichte hier zu Ende?
+
+    narration: str  # deutscher Erzaehltext fuer den Bildschirm
+    visual: str  # englische Bildbeschreibung fuer das Bildmodell
+    raw: str  # das kanonische JSON, geht zurueck in den Chatverlauf
+    number: int  # welche Szene ist das (1-15)
+    max_scenes: int  # wie viele es insgesamt gibt
+    completed: bool  # ist die Geschichte hier zu Ende?
 
 
 class LLM:
@@ -132,7 +151,7 @@ class LLM:
     laeuft. Sie rufen .scene() auf, und das funktioniert immer.
     """
 
-    last_thinking: str = ""   # Reasoning-Text des letzten complete()-Aufrufs
+    last_thinking: str = ""  # Reasoning-Text des letzten complete()-Aufrufs
 
     def scene(self, messages: list[dict], fallback_number: int) -> Scene:
         """Einen Zug spielen: fragen und die Antwort auswerten."""
@@ -156,6 +175,20 @@ class LLM:
         """
         raise NotImplementedError
 
+    def unload(self) -> bool:
+        """Modell wieder freigeben, falls das Backend das braucht.
+
+        Anders als load()/complete(): kein NotImplementedError, sondern ein
+        echter No-Op-Default. Ollama gibt seinen Speicher ueber keep_alive
+        von selbst wieder frei - nur VLLM haelt einen eigenen Serverprozess
+        am Laufen, der beim Beenden des Spiels explizit gestoppt werden
+        muss, und ueberschreibt diese Methode entsprechend.
+
+        Rueckgabe: True heisst "es ist nichts mehr belegt". Fuer Backends
+        ohne eigenen Serverprozess ist das immer der Fall.
+        """
+        return True
+
     def _split_thinking(self, content: str) -> str:
         """<think>...</think> aus dem Content loesen.
 
@@ -165,9 +198,9 @@ class LLM:
         """
         match = _THINK_RE.search(content)
         if not match:
-            return content     # nichts gefunden - unveraendert zurueck
+            return content  # nichts gefunden - unveraendert zurueck
 
-        block = match.group(1).strip()   # Gruppe 1 = das (.*?) im Muster
+        block = match.group(1).strip()  # Gruppe 1 = das (.*?) im Muster
 
         # An vorhandenen Denktext anhaengen (manche Backends liefern beides:
         # ein eigenes Feld UND einen Inline-Block). strip() raeumt danach den
@@ -186,7 +219,7 @@ class Ollama(LLM):
     """
 
     def __init__(self, model: Model):
-        self.name = model.ref        # z.B. "qwen3:32b"
+        self.name = model.ref  # z.B. "qwen3:32b"
         self.last_thinking = ""
 
     def load(self, progress=None) -> None:
@@ -200,8 +233,30 @@ class Ollama(LLM):
         der Aufruf blockiert einfach bis fertig. Der Parameter steht nur da,
         damit main.py beide Backends gleich behandeln kann.
         """
-        self._post("/api/generate", {"model": self.name, "prompt": "",
-                                     "keep_alive": "30m", "stream": False})
+        self._post(
+            "/api/generate",
+            {"model": self.name, "prompt": "", "keep_alive": "30m", "stream": False},
+        )
+
+    def unload(self) -> bool:
+        """Modell sofort aus dem Speicher werfen.
+
+        keep_alive: 0 ist Ollamas Gegenstueck zum "30m" in load() - es weist
+        den Server an, das Modell unmittelbar nach diesem Aufruf freizugeben,
+        statt es noch minutenlang vorzuhalten.
+
+        Ohne diese Methode wuerde Ollama den No-Op-Default der Basisklasse
+        erben und "freigegeben" melden, ohne etwas zu tun - der Befehl waere
+        bei diesem Backend also schlicht gelogen.
+        """
+        try:
+            self._post(
+                "/api/generate",
+                {"model": self.name, "prompt": "", "keep_alive": 0, "stream": False},
+            )
+            return True
+        except Exception:
+            return False
 
     def complete(self, messages: list[dict]) -> str:
         """Den Verlauf schicken und die Antwort als Text zurueckbekommen."""
@@ -210,8 +265,8 @@ class Ollama(LLM):
         payload = {
             "model": self.name,
             "messages": messages,
-            "stream": False,             # alles auf einmal, nicht Stueck fuer Stueck
-            "format": "json",            # Ollama zwingt das Modell zu gueltigem JSON
+            "stream": False,  # alles auf einmal, nicht Stueck fuer Stueck
+            "format": "json",  # Ollama zwingt das Modell zu gueltigem JSON
             "options": {"temperature": 0.9, "num_ctx": NUM_CTX},
             # temperature 0.9 = recht kreativ. Niedriger waere braver und
             # vorhersehbarer - fuer eine generative Geschichte ungeeignet.
@@ -227,8 +282,8 @@ class Ollama(LLM):
             # str(e) macht aus der Exception ihren Text, .lower() macht den
             # Vergleich unabhaengig von Gross-/Kleinschreibung.
             if not THINK or "does not support thinking" not in str(e).lower():
-                raise   # nacktes "raise" wirft den urspruenglichen Fehler weiter
-            payload.pop("think", None)   # Feld entfernen, None = kein Fehler wenn weg
+                raise  # nacktes "raise" wirft den urspruenglichen Fehler weiter
+            payload.pop("think", None)  # Feld entfernen, None = kein Fehler wenn weg
             data = self._post("/api/chat", payload)
 
         # Ollama meldet Fehler manchmal mit HTTP 200 - dann steht die Ursache
@@ -242,8 +297,10 @@ class Ollama(LLM):
         content = self._split_thinking(message.get("content", "").strip())
 
         if not content:
-            raise RuntimeError(f"Ollama lieferte eine leere Antwort von "
-                               f"{self.name} (num_ctx={NUM_CTX}).")
+            raise RuntimeError(
+                f"Ollama lieferte eine leere Antwort von "
+                f"{self.name} (num_ctx={NUM_CTX})."
+            )
         return content
 
     def _post(self, path: str, payload: dict) -> dict:
@@ -270,7 +327,7 @@ class VLLM(LLM):
     """
 
     CONTAINER = os.environ.get("AIGAME_VLLM_CONTAINER", "vllm")
-    TIMEOUT = int(os.environ.get("AIGAME_VLLM_TIMEOUT", "900"))   # 15 Minuten
+    TIMEOUT = int(os.environ.get("AIGAME_VLLM_TIMEOUT", "900"))  # 15 Minuten
 
     # Wohin die Ausgabe von 'vllm serve' umgeleitet wird. Ohne diese Datei
     # waere sie unrettbar verloren: ein detached exec-Prozess schreibt
@@ -281,8 +338,8 @@ class VLLM(LLM):
     LOG = "/tmp/aigame-vllm.log"
 
     def __init__(self, model: Model):
-        self.name = model.ref     # HF-Repo-ID; muss dem Namen entsprechen,
-        self.last_thinking = ""   # den vLLM spaeter serviert
+        self.name = model.ref  # HF-Repo-ID; muss dem Namen entsprechen,
+        self.last_thinking = ""  # den vLLM spaeter serviert
 
     # ------------------------------------------------------------ Laden
 
@@ -295,7 +352,7 @@ class VLLM(LLM):
           ab, statt bis zum Timeout stumm zu warten
         """
         if self.name in self._served():
-            return   # laeuft schon - nichts zu tun
+            return  # laeuft schon - nichts zu tun
 
         box = self._container()
         self._serve(box)
@@ -323,22 +380,29 @@ class VLLM(LLM):
                     f"vLLM beendete sich beim Laden von {self.name}.\n\n"
                     f"{_last_lines(tail)}\n\n"
                     f"Vollstaendiges Log: docker exec {self.CONTAINER} "
-                    f"cat {self.LOG}")
+                    f"cat {self.LOG}"
+                )
 
             time.sleep(2)
 
         raise RuntimeError(
             f"vLLM meldete {self.name} nicht innerhalb von "
             # "//" ist Ganzzahldivision: 900 // 60 ergibt 15, nicht 15.0
-            f"{self.TIMEOUT // 60} Minuten als bereit.\n\n{_last_lines(tail)}")
+            f"{self.TIMEOUT // 60} Minuten als bereit.\n\n{_last_lines(tail)}"
+        )
 
     def _served(self) -> list[str]:
         """Welche Modelle serviert vLLM gerade? Leere Liste, wenn er schweigt."""
         try:
             with urllib.request.urlopen(VLLM_URL + "/v1/models", timeout=3) as r:
                 return [m.get("id", "") for m in json.load(r).get("data", [])]
-        except (urllib.error.URLError, OSError, json.JSONDecodeError,
-                TimeoutError, ValueError):
+        except (
+            urllib.error.URLError,
+            OSError,
+            json.JSONDecodeError,
+            TimeoutError,
+            ValueError,
+        ):
             return []
 
     def _container(self):
@@ -348,13 +412,15 @@ class VLLM(LLM):
         except ImportError:
             raise RuntimeError(
                 "Python package 'docker' is missing - install it or start "
-                f"vLLM manually: vllm serve {self.name} --port 8000") from None
+                f"vLLM manually: vllm serve {self.name} --port 8000"
+            ) from None
         try:
             return docker.from_env().containers.get(self.CONTAINER)
         except Exception as e:
             raise RuntimeError(
                 f"Docker container '{self.CONTAINER}' is not reachable ({e}). "
-                "Is the compose stack up and is the docker socket mounted?") from e
+                "Is the compose stack up and is the docker socket mounted?"
+            ) from e
             # "from e" haengt den Originalfehler an - anders als oben, weil
             # die Docker-Meldung hier oft die eigentliche Ursache nennt.
 
@@ -365,48 +431,139 @@ class VLLM(LLM):
         alle zwei Sekunden. Eine Shell-Zeile erledigt beides.
         """
         try:
-            result = box.exec_run(["sh", "-c",
-                                   f"pgrep -f {_SELF_SAFE} >/dev/null "
-                                   f"&& echo __ALIVE__; tail -c 4000 {self.LOG}"])
+            result = box.exec_run(
+                [
+                    "sh",
+                    "-c",
+                    f"pgrep -f {_SELF_SAFE} >/dev/null "
+                    f"&& echo __ALIVE__; tail -c 4000 {self.LOG}",
+                ]
+            )
             out = result.output.decode(errors="replace")
         except Exception:
-            return True, ""   # Socket zickt - im Zweifel weiterwarten
+            return True, ""  # Socket zickt - im Zweifel weiterwarten
         return "__ALIVE__" in out, out.replace("__ALIVE__", "", 1)
+
+    def _pkill(self, box, wait: int = 15) -> bool:
+        """Alle vLLM-Prozesse im Container beenden und auf die Freigabe warten.
+
+        Warum das mehr ist als ein pkill auf 'vllm serve':
+
+        'vllm serve' ist nur der CLI-Einstieg. vLLM startet daneben einen
+        eigenen Engine-Prozess (bei Tensor-Parallelismus sogar mehrere
+        Worker), und GENAU DIE halten den GPU-Speicher. Toetet man nur den
+        Einstiegsprozess, verschwindet der Server aus /v1/models, der
+        Speicher bleibt aber belegt - dann laesst sich danach kein Ollama
+        mehr laden.
+
+        Statt die Namen dieser Kindprozesse zu raten (sie unterscheiden sich
+        zwischen vLLM-Versionen), fragen wir nvidia-smi direkt, WER gerade
+        GPU-Speicher belegt, und beenden genau diese PIDs. Das laeuft im
+        PID-Namespace des vLLM-Containers - der sieht nur seine eigenen
+        Prozesse, das Bildmodell im Spielcontainer kann also nicht
+        versehentlich mitgetroffen werden.
+
+        Ablauf: erst SIGTERM (freundlich, damit vLLM aufraeumen kann), dann
+        warten, dann SIGKILL fuer alles, was sich weigert.
+
+        Gibt True zurueck, wenn am Ende kein Prozess mehr GPU-Speicher haelt.
+        """
+        # Warum pgrep/pkill und NICHT nvidia-smi --query-compute-apps:
+        # nvidia-smi meldet in einem Container die PIDs aus Sicht des HOSTS,
+        # nicht die des Container-PID-Namespace. Ein kill auf diese Zahlen
+        # ginge im Container ins Leere - oder traefe zufaellig einen ganz
+        # anderen Prozess, der dieselbe Nummer hat. pgrep und pkill arbeiten
+        # dagegen von Natur aus im richtigen Namespace.
+        #
+        # "|| true" haengt an jedem Kill, damit die Shell nicht abbricht,
+        # falls ein Prozess in der Zwischenzeit schon von selbst weg ist.
+        # Stirbt ein Prozess, gibt der Treiber seinen GPU-Speicher frei -
+        # "kein vLLM-Prozess mehr da" heisst also "Speicher frei".
+        script = f"""
+        pkill -TERM -f {_VLLM_ANY} 2>/dev/null || true
+        for i in $(seq 1 {wait}); do
+            pgrep -f {_VLLM_ANY} >/dev/null 2>&1 || break
+            sleep 1
+        done
+        if pgrep -f {_VLLM_ANY} >/dev/null 2>&1; then
+            pkill -KILL -f {_VLLM_ANY} 2>/dev/null || true
+            sleep 2
+        fi
+        sleep 1
+        pgrep -f {_VLLM_ANY} >/dev/null 2>&1 || echo __FREED__
+        """
+        try:
+            result = box.exec_run(["sh", "-c", script])
+            return b"__FREED__" in result.output
+        except Exception:
+            return False  # Socket zickt - Aufrufer entscheidet, was das heisst
+
+    def unload(self) -> bool:
+        """vLLM beenden und den belegten GPU-Speicher wirklich freigeben.
+
+        Wird beim Beenden des Spiels aufgerufen (main.py). Ohne das bliebe
+        der ueber VLLM_GPU_UTIL reservierte Speicher (auf dem DGX Spark oft
+        ~100 GB) belegt - und danach laesst sich kein Ollama mehr laden.
+
+        Der Container selbst bleibt ausdruecklich laufen (kein 'compose
+        down'): nur der Service endet, der Container wartet weiter in seinem
+        'sleep infinity' auf den naechsten Spielstart.
+
+        Rueckgabe True, wenn der Speicher nachweislich frei ist. False heisst
+        "nicht bestaetigt" - main.py sagt das dann sichtbar, statt den Nutzer
+        im Glauben zu lassen, er koenne jetzt Ollama starten.
+
+        Kann kein Container gefunden werden (Docker schon weg, Verbindung
+        tot): dann ist ohnehin nichts mehr zu stoppen - das Beenden des
+        Spiels darf daran nicht scheitern.
+        """
+        try:
+            box = self._container()
+        except RuntimeError:
+            return True  # kein Container = nichts belegt uns noch Speicher
+        return self._pkill(box)
 
     def _serve(self, box) -> None:
         """'vllm serve <modell>' im Nachbarcontainer starten."""
-        # Alte serve-Instanz stoppen (beim Modellwechsel), damit sie den
-        # VRAM freigibt. Schlaegt das fehl, lief eben keine - kein Problem,
-        # daher das leere except.
-        try:
-            box.exec_run(["sh", "-c", f"pkill -f {_SELF_SAFE}; sleep 2"])
-        except Exception:
-            pass   # "pass" heisst: absichtlich nichts tun
-
-        time.sleep(3)   # dem Treiber Zeit geben, den Speicher freizugeben
+        # Alte Instanz stoppen (beim Modellwechsel) und warten, BIS der
+        # Speicher wirklich frei ist. _pkill() prueft das selbst per
+        # nvidia-smi - deshalb hier kein blindes sleep mehr, das entweder
+        # zu kurz waere (neues Modell scheitert an belegtem Speicher) oder
+        # unnoetig lange bremst.
+        self._pkill(box)
 
         # shlex.join baut aus der Argumentliste eine Shell-Zeile und quotet
         # dabei alles, was Sonderzeichen enthaelt. Noetig, weil wir wegen
         # der Umleitung ">" eine echte Shell brauchen und den Modellnamen
         # nicht ungeprueft hineinschreiben wollen.
-        command = shlex.join([
-            "vllm", "serve", self.name,
-            "--host", "0.0.0.0",
-            # rsplit(":", 1) teilt am LETZTEN Doppelpunkt, [-1] nimmt das
-            # letzte Stueck: aus "http://vllm:8000" wird "8000".
-            "--port", VLLM_URL.rsplit(":", 1)[-1],
-            "--gpu-memory-utilization", VLLM_GPU_UTIL,
-            "--max-model-len", str(NUM_CTX),
-        ])
+        command = shlex.join(
+            [
+                "vllm",
+                "serve",
+                self.name,
+                "--host",
+                "0.0.0.0",
+                # rsplit(":", 1) teilt am LETZTEN Doppelpunkt, [-1] nimmt das
+                # letzte Stueck: aus "http://vllm:8000" wird "8000".
+                "--port",
+                VLLM_URL.rsplit(":", 1)[-1],
+                "--gpu-memory-utilization",
+                VLLM_GPU_UTIL,
+                "--max-model-len",
+                str(NUM_CTX),
+            ]
+        )
         try:
             # 2>&1 leitet auch die Fehlerausgabe in dieselbe Datei - genau
             # dort steht der Traceback, wenn vLLM beim Laden abbricht.
-            box.exec_run(["sh", "-c", f"{command} > {self.LOG} 2>&1"],
-                         detach=True)   # nicht warten - der Server laeuft dauerhaft
+            box.exec_run(
+                ["sh", "-c", f"{command} > {self.LOG} 2>&1"], detach=True
+            )  # nicht warten - der Server laeuft dauerhaft
         except Exception as e:
             raise RuntimeError(
                 f"Could not start 'vllm serve' inside container "
-                f"'{self.CONTAINER}' ({e}). Is the container running?") from e
+                f"'{self.CONTAINER}' ({e}). Is the container running?"
+            ) from e
 
     # ----------------------------------------------------------- Abfragen
 
@@ -416,7 +573,7 @@ class VLLM(LLM):
             "messages": messages,
             "temperature": 0.9,
             "max_tokens": MAX_TOKENS,
-            "response_format": {"type": "json_object"},   # JSON erzwingen
+            "response_format": {"type": "json_object"},  # JSON erzwingen
         }
         try:
             data = _json_post(VLLM_URL + "/v1/chat/completions", payload, timeout=600)
@@ -525,7 +682,7 @@ def _int(value, default: int) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
-        return default   # None -> TypeError, "sieben" -> ValueError
+        return default  # None -> TypeError, "sieben" -> ValueError
 
 
 def parse_scene(raw: str, fallback_number: int) -> Scene:
@@ -553,11 +710,11 @@ def parse_scene(raw: str, fallback_number: int) -> Scene:
     start, end = text.find("{"), text.rfind("}")
     obj = None
     if start != -1 and end > start:
-        text = text[start:end + 1]   # +1, weil das Ende exklusiv ist
+        text = text[start : end + 1]  # +1, weil das Ende exklusiv ist
         try:
             obj = json.loads(text)
         except json.JSONDecodeError:
-            obj = None   # kaputtes JSON - unten faellt es auf den Notfall
+            obj = None  # kaputtes JSON - unten faellt es auf den Notfall
 
     # Fall 3: Notfall. Gar kein brauchbares JSON - dann zeigen wir eben den
     # Rohtext als Erzaehltext an. Besser als ein leerer Bildschirm.
@@ -572,18 +729,26 @@ def parse_scene(raw: str, fallback_number: int) -> Scene:
         value = obj.get(key)
         return value if isinstance(value, dict) else {}
 
-    game, scene, final = section("game"), section("scene"), section("final_scene_output")
+    game, scene, final = (
+        section("game"),
+        section("scene"),
+        section("final_scene_output"),
+    )
 
     return Scene(
         # Die "or"-Ketten sind Rueckfallebenen: nimm final_scene_output, sonst
         # scene, sonst leer. Manche Modelle fuellen nur eins der beiden.
         # str(...) stellt sicher, dass wirklich Text herauskommt, auch wenn
         # das Modell dort eine Zahl oder eine Liste abgelegt hat.
-        narration=str(final.get("narrator_text")
-                      or scene.get("narrator_text") or "").strip(),
-        visual=str(final.get("visual_scene_description")
-                   or scene.get("visual_scene_description")
-                   or scene.get("visual_prompt") or "").strip(),
+        narration=str(
+            final.get("narrator_text") or scene.get("narrator_text") or ""
+        ).strip(),
+        visual=str(
+            final.get("visual_scene_description")
+            or scene.get("visual_scene_description")
+            or scene.get("visual_prompt")
+            or ""
+        ).strip(),
         raw=text,
         number=_int(game.get("scene_number"), fallback_number),
         max_scenes=_int(game.get("max_scenes"), MAX_SCENES),
@@ -591,4 +756,3 @@ def parse_scene(raw: str, fallback_number: int) -> Scene:
         # .lower() faengt "Completed" und "COMPLETED" mit ab.
         completed=str(game.get("status", "")).lower() == "completed",
     )
-

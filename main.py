@@ -33,6 +33,13 @@ Ein Durchlauf endet, wenn das Modell game.status auf "completed" setzt
 Titelbildschirm - die Modelle bleiben dafuer geladen, weil das Laden
 Minuten dauert und die Geschichte davon unabhaengig ist.
 
+=== Befehle an jeder Eingabezeile ===
+
+    /restart   zurueck zum Titelbildschirm, neue Geschichte
+    unload     Sprachmodell freigeben, Programm laeuft weiter - damit man
+               in der Fusszeile zusehen kann, ob der Speicher zurueckkommt
+    Strg+C     Programm beenden (gibt das Modell dabei ebenfalls frei)
+
 Start:  python3 main.py
 """
 
@@ -51,16 +58,21 @@ import ui
 TITLE = "RePlot"
 TITLE_FILE = Path(__file__).resolve().parent / "title_screen.txt"
 
-VIEWPORT_COLS = 80  # max. Bildbreite in Zellen - breiter wirkt es zerlaufen
-TEXT_ROWS = 12  # Reserve: Kopf- und Fusszeile, Erzaehltext, Eingabe
-TEXT_WIDTH = 72  # Umbruchbreite des Erzaehltexts
-MARGIN = 2  # Einrueckung links
+VIEWPORT_COLS = 80   # max. Bildbreite in Zellen - breiter wirkt es zerlaufen
+TEXT_ROWS = 12       # Reserve: Kopf- und Fusszeile, Erzaehltext, Eingabe
+TEXT_WIDTH = 72      # Umbruchbreite des Erzaehltexts
+MARGIN = 2           # Einrueckung links
 
 RESTART = "/restart"
 
+# "unload" gibt das Sprachmodell frei, ohne das Programm zu beenden - man
+# kann danach in der Fusszeile zusehen, wie der Speicher zurueckkommt.
+# Beendet wird mit Strg+C. Beide Schreibweisen, weil /restart einen
+# Schraegstrich hat und der Finger ihn hier gern mittippt.
+UNLOAD_WORDS = {"unload", "/unload"}
+
 
 # ------------------------------------------------------------------ Setup
-
 
 def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
     """Backend, Sprachmodell, Bildmodell - nur einmal pro Sitzung.
@@ -74,12 +86,9 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
 
     # ui.select() gibt einen Index zurueck (0 oder 1). Das Tupel davor wird
     # damit indiziert: ("ollama", "vllm")[0] ergibt "ollama".
-    backend = ("ollama", "vllm")[
-        ui.select(
-            "Inference backend",
-            [f"ollama   {models.OLLAMA_URL}", f"vllm     {models.VLLM_URL}"],
-        )
-    ]
+    backend = ("ollama", "vllm")[ui.select(
+        "Inference backend",
+        [f"ollama   {models.OLLAMA_URL}", f"vllm     {models.VLLM_URL}"])]
 
     # indent=ui.INDENT: waehrend Backend/Modell-Auswahl steht auch der
     # Spinner buendig mit "RePlot" und "RAM", nicht am linken Rand wie der
@@ -88,10 +97,11 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
         # Hier wird die FUNKTION ausgewaehlt (ohne Klammern), und erst das
         # "()" ganz am Ende ruft die gewaehlte auf. Sonst wuerden beide
         # laufen, obwohl nur eine gebraucht wird.
-        found = (models.ollama_models if backend == "ollama" else models.vllm_models)()
+        found = (models.ollama_models if backend == "ollama"
+                 else models.vllm_models)()
 
     if not found:
-        sys.exit(_no_models(backend))  # beendet das Programm mit Meldung
+        sys.exit(_no_models(backend))   # beendet das Programm mit Meldung
 
     choice = found[ui.select("Language model", [m.label for m in found])]
     engine = llm.build(choice)
@@ -125,18 +135,13 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
 def _no_models(backend: str) -> str:
     """Eine Fehlermeldung, die auch sagt, was zu tun ist."""
     if backend == "ollama":
-        return (
-            f"No models reported by Ollama at {models.OLLAMA_URL}. "
-            "Is it running with OLLAMA_HOST=0.0.0.0?"
-        )
-    return (
-        f"No language models in {models.cache_root() or 'the HF cache'}. "
-        "Set AIGAME_CACHE if it lives elsewhere."
-    )
+        return (f"No models reported by Ollama at {models.OLLAMA_URL}. "
+                "Is it running with OLLAMA_HOST=0.0.0.0?")
+    return (f"No language models in {models.cache_root() or 'the HF cache'}. "
+            "Set AIGAME_CACHE if it lives elsewhere.")
 
 
 # ------------------------------------------------------------------ Render
-
 
 def show_title() -> None:
     """ASCII-Titel vor der ersten Eingabe. Fehlt die Datei: ueberspringen.
@@ -152,10 +157,8 @@ def show_title() -> None:
     if not TITLE_FILE.exists():
         return
     indent = " " * MARGIN
-    art = "\n".join(
-        indent + line
-        for line in TITLE_FILE.read_text(encoding="utf-8").rstrip().splitlines()
-    )
+    art = "\n".join(indent + line for line in
+                    TITLE_FILE.read_text(encoding="utf-8").rstrip().splitlines())
     ui.write(f"{ui.GRAY}{art}{ui.RESET}\n")
 
 
@@ -164,7 +167,7 @@ def render(image, narration: str) -> None:
 
     Frueher endete das hier mit einer Trennlinie (ui.rule()) unter dem
     Erzaehltext. Die ist weg - die Eingabezeile, die der Aufrufer direkt im
-    Anschluss zeichnet (ask_turn() -> ui.ask()), uebernimmt jetzt selbst die
+    Anschluss zeichnet (ask_turn() -> prompt()), uebernimmt jetzt selbst die
     Rolle des Abschlusses. Eine Leerzeile Abstand bleibt trotzdem, damit
     Text und Prompt nicht aneinander kleben.
 
@@ -207,7 +210,6 @@ def paint(painter: diffusion.Diffusion, visual: str):
 
 # ------------------------------------------------------------------ Story
 
-
 def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame) -> bool:
     """Ein kompletter Durchlauf. Rueckgabe True: noch eine Geschichte starten.
 
@@ -215,13 +217,13 @@ def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame) ->
     wird hier nur benutzt, nicht erzeugt oder gestoppt - das macht main().
     """
     ui.clear_body()
-    frame.reset_scene()  # "Szene 15/15" der letzten Geschichte ausblenden
+    frame.reset_scene()   # "Szene 15/15" der letzten Geschichte ausblenden
     show_title()
     ui.write(f"\n{ui.GRAY} REPLOT YOUR STORY:{ui.RESET}\n")
-    start_prompt = ui.ask()
+    start_prompt = prompt(engine)   # nicht ui.ask(): "unload" soll auch hier gehen
 
     tale = story.Story(engine, start_prompt)
-    turn = tale.first_turn  # der erste "Zug" kommt vom Programm, nicht vom Spieler
+    turn = tale.first_turn   # der erste "Zug" kommt vom Programm, nicht vom Spieler
 
     try:
         while True:
@@ -232,42 +234,71 @@ def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame) ->
                 # Zug gescheitert. story.Story hat den Verlauf sauber
                 # gehalten, der Spieler darf einfach nochmal.
                 ui.write("\n" + ui.wrap(str(e), TEXT_WIDTH, " " * MARGIN) + "\n\n")
-                turn = ask_turn()
+                turn = ask_turn(engine)
                 if turn is None:
-                    return True  # /restart
-                continue  # zurueck an den Schleifenanfang
+                    return True     # /restart
+                continue            # zurueck an den Schleifenanfang
 
             frame.update(scene.number, scene.max_scenes)
             # Von innen nach aussen gelesen: erst malen, dann anzeigen.
             render(paint(painter, scene.visual), scene.narration)
 
             if scene.completed:
-                ui.write(
-                    ui.wrap("The journey has ended.", TEXT_WIDTH, " " * MARGIN) + "\n\n"
-                )
+                ui.write(ui.wrap("The journey has ended.", TEXT_WIDTH,
+                                 " " * MARGIN) + "\n\n")
                 # "== 0" macht aus dem Index ein True/False: 0 ist
                 # "start a new story", also weitermachen.
                 return ui.select("What next?", ["start a new story", "quit"]) == 0
 
-            turn = ask_turn()
+            turn = ask_turn(engine)
             if turn is None:
                 return True
     finally:
         tale.close()
 
 
-def ask_turn() -> str | None:
+def unload_model(engine: llm.LLM) -> None:
+    """Sprachmodell freigeben, ohne das Programm zu beenden.
+
+    Genau das ist der Zweck: danach laeuft alles weiter, und man kann in
+    der Fusszeile beobachten, ob der Speicher wirklich zurueckkommt.
+    """
+    with ui.Status("unloading language model", indent=ui.INDENT):
+        freed = engine.unload()
+
+    ui.write(ui.wrap(
+        "Language model released - watch the RAM bar. Ctrl+C to quit."
+        if freed else
+        "Could not confirm the release - check with 'nvidia-smi'.",
+        TEXT_WIDTH, " " * MARGIN) + "\n\n")
+
+
+def prompt(engine: llm.LLM) -> str:
+    """Eingabe holen und dabei "unload" abfangen.
+
+    Die Schleife sorgt dafuer, dass "unload" KEINE Spieleingabe wird: nach
+    dem Freigeben wird einfach erneut gefragt. Hier statt in ui.ask(), weil
+    ui.py nichts von Sprachmodellen wissen soll.
+    """
+    while True:
+        value = ui.ask()
+        if value.lower() in UNLOAD_WORDS:
+            unload_model(engine)
+            continue
+        return value
+
+
+def ask_turn(engine: llm.LLM) -> str | None:
     """Naechste Eingabe; None bedeutet: Neustart angefordert.
 
     None als Sonderwert statt einer eigenen Exception - bei genau einem
     Sonderfall ist das die einfachere Loesung.
     """
-    value = ui.ask()
+    value = prompt(engine)
     return None if value.lower() == RESTART else value
 
 
 # ------------------------------------------------------------------ Loop
-
 
 def main() -> None:
     # isatty() = "haengt hier ein echtes Terminal dran?". Bei "python main.py
@@ -284,22 +315,48 @@ def main() -> None:
     ui.clear()
     frame = ui.Frame(TITLE).start()
 
+    # None, bis pick_models() zurueckkommt: schlaegt das Laden selbst fehl
+    # (sys.exit in pick_models), gibt es noch kein Modell zum Entladen -
+    # der finally-Block unten prueft das ab.
+    engine = None
+
     try:
         engine, painter = pick_models(frame)
         # Die Schleife laeuft, solange run_story() True liefert. Der Rumpf
         # ist leer - die ganze Arbeit steckt in der Bedingung.
         while run_story(engine, painter, frame):
-            pass  # Neustart: gleiche Modelle, neue Geschichte
+            pass   # Neustart: gleiche Modelle, neue Geschichte
     except KeyboardInterrupt:
-        pass  # Strg+C ist ein normaler Weg zu gehen, kein Fehler
+        pass       # Strg+C ist ein normaler Weg zu gehen, kein Fehler
     finally:
         # finally laeuft IMMER: bei return, bei Strg+C, bei jedem Fehler
-        # (auch bei sys.exit() aus pick_models - SystemExit zaehlt hier mit).
+        # (auch bei sys.exit() aus pick_models und beim SystemExit, das
+        # ui.ask()/ui.select() fuer 'q'/Strg+C/Strg+D werfen). Deshalb steht
+        # engine.unload() hier und nicht an einem einzelnen Ausstiegsweg:
+        # bei JEDEM Programmende soll der Speicher zurueckkommen.
+        #
+        # Der "unload"-Befehl ist davon unabhaengig - er dient dem Zusehen
+        # waehrend das Programm laeuft. Hat der Spieler ihn schon benutzt,
+        # ist dieser Aufruf ein harmloser Leerlauf: es gibt dann keinen
+        # Prozess mehr zu beenden.
+        freed = True
+        if engine is not None:
+            with ui.Status("unloading model", indent=ui.INDENT):
+                freed = engine.unload()
         # Ohne das bliebe die Scroll-Region gesetzt und das Terminal waere
         # nach dem Spiel kaputt.
         frame.stop()
         ui.show_cursor()
         ui.write("\n")
+
+        # Erst NACH frame.stop(): der Rahmen haelt sonst die letzte Zeile
+        # besetzt und ueberschreibt die Meldung eine Sekunde spaeter wieder.
+        if not freed:
+            ui.write(ui.wrap(
+                "Warning: vLLM may still be holding GPU memory. Check with "
+                "'nvidia-smi'; if needed: "
+                f"docker exec {llm.VLLM.CONTAINER} pkill -KILL -f 'vllm'",
+                indent=" " * MARGIN) + "\n\n")
 
 
 # Dieser Block laeuft nur, wenn die Datei direkt gestartet wird
@@ -307,3 +364,4 @@ def main() -> None:
 # Ohne ihn wuerde schon ein "import main" das ganze Spiel starten.
 if __name__ == "__main__":
     main()
+
