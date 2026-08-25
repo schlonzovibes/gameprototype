@@ -11,11 +11,12 @@ services:
       # vLLM-Server aus dem Spiel heraus steuern (llm.VLLM.load)
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      VLLM_URL: http://vllm:8000   # wird von discovery.py/llm.py gelesen
+      VLLM_URL: http://vllm:8000   # wird von models.py/llm.py gelesen
       # Ollama laeuft auf dem Host - nur via host-gateway erreichbar
       # (Voraussetzung: OLLAMA_HOST=0.0.0.0 ollama serve auf dem Host).
       OLLAMA_URL: http://host.docker.internal:11434
-      AIGAME_MODEL_DIRS: /workspace/gameprototype/diffusion_models
+      # Sprach- UND Bildmodelle liegen im selben HF-Cache (/root/.cache);
+      # models.py findet ihn ohne weitere Konfiguration.
       AIGAME_NUM_CTX: 24576
       AIGAME_THINK: "1"
       TERM: ${TERM:-xterm-256color}
@@ -28,8 +29,6 @@ services:
     # Zeilen literal, und bash verlangt die Operatoren am Zeilenende.
     command: >
       bash -c "pip install 'diffusers>=0.36' transformers accelerate safetensors pillow docker &&
-        (CMAKE_ARGS='-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=native' FORCE_CMAKE=1 pip install llama-cpp-python ||
-        echo 'WARN: llama-cpp-python build fehlgeschlagen - GGUF-Modelle nicht verfuegbar') &&
         sleep infinity
         "
     depends_on:
@@ -61,3 +60,4 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
