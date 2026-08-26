@@ -1,9 +1,6 @@
-"""Unittests fuer story.Game.advance() - Fehlerisolierung ueber eine Runde.
-
-Kriterien E (ein scheiternder DECIDE setzt nur die eine Figur aus, die
-Runde laeuft weiter) und F (ein scheiterndes NARRATE laesst self.world
-byteweise unveraendert), gegen einen FakeEngine statt eines echten
-Sprachmodells.
+"""Unittests fuer story.Game.advance() - Fehlerisolierung und die
+Charakterquote-Notbremse ueber eine Runde, gegen einen FakeEngine statt
+eines echten Sprachmodells.
 """
 
 import tempfile
@@ -22,9 +19,10 @@ def _fill(model_cls, overrides=None):
 
     Iteriert model_fields und setzt fuer jeden Typ einen harmlosen
     Platzhalter - str -> "", bool -> False, list -> [], Literal -> den
-    ersten erlaubten Wert (bevorzugt "stay", falls vorhanden - eine echte
-    Bewegung waere ein Seiteneffekt, den die meisten Tests nicht wollen),
-    verschachtelte BaseModel-Klassen rekursiv.
+    ersten erlaubten Wert (bevorzugt "stay", falls vorhanden), verschachtelte
+    BaseModel-Klassen rekursiv (ein leerer new_room.name heisst dabei
+    automatisch "kein neuer Raum diese Runde" - genau der beabsichtigte
+    Default).
     """
     overrides = overrides or {}
     kwargs = {}
@@ -57,8 +55,10 @@ class FakeEngine:
     def __init__(self, fail_on: set[str] = frozenset()):
         self.last_thinking = ""
         self.fail_on = set(fail_on)
+        self.calls: list[str] = []   # model_cls.__name__ je Aufruf
 
     def structured(self, messages, model_cls, retries=1):
+        self.calls.append(model_cls.__name__)
         user = messages[1]["content"]
         for marker in self.fail_on:
             if marker in user:
@@ -66,8 +66,8 @@ class FakeEngine:
         return _fill(model_cls)
 
 
-def _three_npc_world() -> World:
-    return World(
+def _world_with_agentic() -> World:
+    world = World(
         language="en",
         nodes={
             "n1": Node(id="n1", name="Hall", anchor="stone floor",
@@ -75,16 +75,10 @@ def _three_npc_world() -> World:
             "n2": Node(id="n2", name="Cellar", anchor="damp walls",
                       exits=[Exit(to="n1", one_way=False, justification="")]),
         },
-        characters={
-            "c1": Character(id="c1", name="Vogel", at="n1",
-                            agenda="get out", aim="find the door"),
-            "c2": Character(id="c2", name="Renner", at="n1",
-                            agenda="hide", aim="stay quiet"),
-            "c3": Character(id="c3", name="Katz", at="n1",
-                            agenda="watch", aim="observe"),
-        },
-        facts=[], player_at="n1",
+        characters={}, facts=[], player_at="n1",
     )
+    world.add_character("Vogel", "n1", "get out", is_agentic=True)
+    return world
 
 
 class GameTestCase(unittest.TestCase):
@@ -104,44 +98,42 @@ class GameTestCase(unittest.TestCase):
         return story.Game(engine, "a test story", SYSTEM_DIR)
 
 
-class DecideFailureIsolationTest(GameTestCase):
-    """Kriterium E."""
+class AgenticFailureIsolationTest(GameTestCase):
+    """Ein scheiternder agentischer Zug (DECIDE oder RESOLVE) darf die
+    Runde nicht abbrechen - nur er selbst entfaellt."""
 
-    def test_failed_decide_skips_only_that_npc(self):
-        engine = FakeEngine(fail_on={"YOU ARE c2"})
+    def test_failed_decide_does_not_abort_round(self):
+        engine = FakeEngine(fail_on={"YOU ARE c1"})
         game = self._game(engine)
-        game.world = _three_npc_world()
+        game.world = _world_with_agentic()
 
         acted = []
         beat = game.advance("look around", on_actor=acted.append)
 
         self.assertIsNotNone(beat)
-        self.assertEqual(game.world.characters["c2"].aim, "stay quiet",
-                         "c2's DECIDE never completed, aim must be unchanged")
-        self.assertNotEqual(game.world.characters["c3"].aim, "observe",
-                            "c3 should have decided+resolved normally")
-        self.assertEqual(acted, ["Vogel is acting", "Renner is acting",
-                                 "Katz is acting"])
+        self.assertEqual(game.world.characters["c1"].aim, "",
+                         "DECIDE never completed, aim must be unchanged")
+        self.assertEqual(acted, ["Vogel is acting"])
         game.close()
 
-    def test_failed_resolve_skips_only_that_npc(self):
+    def test_failed_resolve_does_not_abort_round(self):
         engine = FakeEngine(fail_on={"ACTING: c1"})
         game = self._game(engine)
-        game.world = _three_npc_world()
+        game.world = _world_with_agentic()
 
-        game.advance("look around")
+        beat = game.advance("look around")
 
-        # c1's DECIDE succeeded (aim changed) but its RESOLVE failed - the
-        # aim change on the discarded... no, COMMITTED copy is harmless and
-        # expected (see story.Game.advance docstring).
-        self.assertNotEqual(game.world.characters["c1"].aim, "find the door")
-        self.assertNotEqual(game.world.characters["c3"].aim, "observe")
+        self.assertIsNotNone(beat)
+        # DECIDE selbst lief durch (nur RESOLVE scheiterte - unschaedlich,
+        # siehe Game.advance()-Docstring): "Decide" muss unter den
+        # Aufrufen sein, "ResolveAgentic" wurde zwar versucht aber warf.
+        self.assertIn("Decide", engine.calls)
+        self.assertIn("ResolveAgentic", engine.calls)
+        self.assertEqual(game.world.characters["c1"].status, "active")
         game.close()
 
 
 class NarrateFailureTest(GameTestCase):
-    """Kriterium F."""
-
     def test_failed_narrate_leaves_world_unchanged(self):
         engine = FakeEngine(fail_on={"YOUR PLACE"})
         game = self._game(engine)
@@ -158,6 +150,88 @@ class NarrateFailureTest(GameTestCase):
 
         self.assertEqual(_snapshot(game.world), before)
         self.assertIs(game.world, world, "self.world must not be reassigned")
+        game.close()
+
+
+class QuotaNotbremseTest(GameTestCase):
+    def test_mandatory_retry_stops_after_three_attempts_and_spawns_fallback(self):
+        # scene_number=5 -> turn_number=6 > 5 -> MANDATORY; die Engine
+        # liefert bei JEDEM ResolvePlayer-Aufruf ein leeres
+        # characters_introduced, die Notbremse muss also alle drei
+        # Versuche ausschoepfen und danach selbst einen NPC anlegen.
+        engine = FakeEngine()
+        game = self._game(engine)
+        world = World(
+            language="en",
+            nodes={"n1": Node(id="n1", name="Hall", anchor="stone", exits=[])},
+            characters={}, facts=[], player_at="n1", scene_number=5,
+        )
+        game.world = world
+
+        game.advance("do nothing")
+
+        player_resolve_calls = sum(1 for c in engine.calls if c == "ResolvePlayer")
+        self.assertEqual(player_resolve_calls, 3)
+        self.assertEqual(len(game.world.characters), 1)
+        self.assertIsNotNone(game.world.agentic_char_id)
+        game.close()
+
+    def test_soft_direction_does_not_force_retries(self):
+        # turn_number klein genug fuer weiche Fuehrung (kein MANDATORY) -
+        # ein einziger ResolvePlayer-Aufruf reicht, auch wenn die Engine
+        # keine Charaktere einfuehrt.
+        engine = FakeEngine()
+        game = self._game(engine)
+        world = World(
+            language="en",
+            nodes={"n1": Node(id="n1", name="Hall", anchor="stone", exits=[])},
+            characters={}, facts=[], player_at="n1",
+        )
+        game.world = world
+
+        game.advance("look around")
+
+        player_resolve_calls = sum(1 for c in engine.calls if c == "ResolvePlayer")
+        self.assertEqual(player_resolve_calls, 1)
+        game.close()
+
+    def test_fallback_fires_even_when_attempt_falls_short_of_the_quota(self):
+        """Regression: das Modell VERSUCHT eine Figur einzufuehren (die
+        Notbremse-Schleife bricht deshalb sofort nach dem ersten Versuch
+        ab - delta_p.characters_introduced ist nicht leer), aber davon
+        ausgehend, dass noch KEINE Figur existiert, reicht eine einzelne
+        neue Figur nicht, um die Quote (mindestens 3) zu erfuellen. Ein
+        Fallback, der nur auf "hat das Modell ueberhaupt etwas versucht"
+        prueft statt auf die tatsaechliche Quote NACH dem Anwenden, wuerde
+        das faelschlich als erledigt behandeln."""
+        class PartialAttemptEngine(FakeEngine):
+            def structured(self, messages, model_cls, retries=1):
+                self.calls.append(model_cls.__name__)
+                if model_cls.__name__ == "ResolvePlayer":
+                    NC = model_cls.model_fields["characters_introduced"].annotation.__args__[0]
+                    one = _fill(NC, {"name": "Sailor", "at": "n1",
+                                     "agenda_draft": "x", "agenda_target_hint": "x"})
+                    return _fill(model_cls, {"characters_introduced": [one]})
+                return _fill(model_cls)
+
+        engine = PartialAttemptEngine()
+        game = self._game(engine)
+        world = World(
+            language="en",
+            nodes={"n1": Node(id="n1", name="Hall", anchor="stone", exits=[])},
+            characters={}, facts=[], player_at="n1", scene_number=5,
+        )
+        game.world = world
+
+        game.advance("do nothing")
+
+        player_resolve_calls = sum(1 for c in engine.calls if c == "ResolvePlayer")
+        self.assertEqual(player_resolve_calls, 1,
+                         "the loop breaks after one attempt since the model "
+                         "did try - falling short is only visible after apply_turn")
+        self.assertEqual(len(game.world.characters), 2,
+                         "the one introduced character plus the fallback - "
+                         "one alone does not satisfy the quota of three")
         game.close()
 
 

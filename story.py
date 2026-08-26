@@ -20,27 +20,55 @@ prefix-cachebar - der Server prefillt ihn einmal und danach nie wieder.
 
 === Ein Spielsystem ist ein ORDNER ===
 
-    game_prompts/<name>/init.txt      Weltgenerator, laeuft genau einmal
-    game_prompts/<name>/decide.txt    eine Figur entscheidet fuer sich
-    game_prompts/<name>/resolve.txt   loest EINEN Akteurzug zu einem Delta auf
-    game_prompts/<name>/narrate.txt   erzaehlt, was der Spieler wahrnehmen konnte
+    game_prompts/<name>/init.txt            Weltgenerator - erzeugt NUR den
+                                            Startraum, laeuft genau einmal
+    game_prompts/<name>/decide.txt          die eine agentische Figur
+                                            entscheidet fuer sich
+    game_prompts/<name>/resolve_player.txt  loest die Spieleraktion zu
+                                            einem Delta auf
+    game_prompts/<name>/resolve_agentic.txt loest den Zug der agentischen
+                                            Figur zu einem Delta auf
+    game_prompts/<name>/narrate.txt         erzaehlt, was der Spieler
+                                            wahrnehmen konnte
 
 Keine dieser Dateien enthaelt eine Feldliste. Die kommt zur Laufzeit aus
 schema.describe() - wer sie in die Datei schriebe, haette die Drift wieder
 eingebaut, gegen die der ganze Umbau geht.
 
-=== Die Runde (agentische NPCs) ===
+`game_prompts/<name>/npc_names.txt` ist eine fuenfte, OPTIONALE Datei (eine
+Zeile je Name) - Fallback-Namenspool fuer den Fall, dass die
+Charakterquote-Notbremse (siehe advance()) selbst nach mehreren
+Wiederholungsversuchen keine Figur vom Modell bekommt und der Client eine
+schmucklose NPC-Figur selbst anlegen muss. Fehlt die Datei, greift eine
+kleine eingebaute Liste - ein Spielsystem ohne diese Datei bleibt spielbar.
 
-Eine Runde besteht aus mehreren Akteurzuegen, nicht mehr aus einem: zuerst
-der Spieler, dann jeder aktive NPC in stabiler Reihenfolge (DECIDE -> aus
-seiner eigenen, gefilterten Wahrnehmung heraus; RESOLVE -> mit vollem
-Weltwissen), zuletzt EIN Erzaehl-Aufruf (NARRATE), der nur die Ereignisse
-sieht, die am Spielerknoten passiert sind. Der Resolver erzaehlt selbst
-nichts mehr - er liefert nur noch strukturierte events (Ort + Klausel), aus
-denen sich Erinnerungen und Erzaehlmaterial deterministisch ergeben (siehe
-state.World.apply_turn/visible). Die ganze Runde laeuft auf einer Kopie der
-Welt (World.copy()) und wird erst nach erfolgreichem NARRATE committet -
-schlaegt etwas davor fehl, ist self.world exakt wie vorher.
+=== Die wachsende Welt und der eine agentische NPC ===
+
+INIT erzeugt nur einen Startraum, keinen Graphen, keine Figuren - die
+Levelgeometrie entsteht waehrend des Spielens: RESOLVE(mode=player) darf
+einen neuen Raum vorschlagen, sobald die Erzaehlung ihn braucht (persistent,
+kein Raum verschwindet je wieder), und bis spaetestens Runde 5 muessen
+mindestens drei Figuren aufgetaucht sein, davon genau eine agentisch (siehe
+state.World.character_quota_status - weiche Fuehrung, dann eine harte
+Notbremse mit begrenzten Wiederholungsversuchen).
+
+Eine Runde besteht aus hoechstens zwei Akteurzuegen: der Spieler (RESOLVE
+mode=player), dann - falls die eine agentische Figur schon existiert und
+aktiv ist - ihr eigener Zug (DECIDE aus ihrer gefilterten Wahrnehmung
+heraus, dann RESOLVE mode=agentic mit vollem Weltwissen). Zuletzt EIN
+Erzaehl-Aufruf (NARRATE), der nur die Ereignisse sieht, die am Spielerort
+passiert sind. Der Resolver erzaehlt selbst nichts mehr - er liefert nur
+strukturierte events (Ort + Klausel), aus denen sich Erinnerungen und
+Erzaehlmaterial deterministisch ergeben (siehe state.World.apply_turn/
+visible). Die ganze Runde laeuft auf einer Kopie der Welt (World.copy())
+und wird erst nach erfolgreichem NARRATE committet - schlaegt etwas davor
+fehl, ist self.world exakt wie vorher.
+
+Die agentische Figur verfolgt zusaetzlich ein VERBORGENES gemeinsames Ziel
+mit dem Spieler (siehe state.py) - real und beide Akteure lenkend, aber nie
+ausgesprochen. Ein einfacher Teilstring-Check nach jedem NARRATE
+protokolliert einen Verstoss (falls der Erzaehltext das Ziel doch woertlich
+nennt) ins Debug-Log, ohne das Spiel abzubrechen.
 """
 
 from __future__ import annotations
@@ -58,9 +86,17 @@ HERE = Path(__file__).resolve().parent
 DEBUG_DIR = HERE / "debug"
 PROMPTS_DIR = HERE / "game_prompts"
 
-# Die vier Dateien, aus denen ein Spielsystem besteht. Fehlt eine, ist der
-# Ordner keins - available_systems() zeigt ihn dann gar nicht erst an.
-PARTS = ("init.txt", "decide.txt", "resolve.txt", "narrate.txt")
+# Die fuenf Pflichtdateien, aus denen ein Spielsystem besteht. Fehlt eine,
+# ist der Ordner keins - available_systems() zeigt ihn dann gar nicht erst
+# an. npc_names.txt ist bewusst NICHT hier drin - siehe Modul-Docstring,
+# das bleibt optional.
+PARTS = ("init.txt", "decide.txt", "resolve_player.txt",
+        "resolve_agentic.txt", "narrate.txt")
+
+# Greift nur, wenn ein Spielsystem kein eigenes npc_names.txt mitbringt
+# (siehe Game.__init__) - kurz gehalten, weil die Notbremse sie hoechst
+# selten je braucht.
+_FALLBACK_NAMES = ["Vale", "Marrow", "Osei", "Brandt", "Iker"]
 
 # Die Szenengrenze liegt jetzt hier, nicht mehr im Modelloutput. Frueher
 # meldete das Modell game.scene_number und game.status, und der Client
@@ -108,9 +144,9 @@ class Beat:
 def available_systems() -> list[Path]:
     """Alle vollstaendigen Spielsysteme, alphabetisch.
 
-    Vollstaendig heisst: der Ordner enthaelt alle vier Dateien. Ein halb
-    angelegtes System taucht gar nicht erst auf - besser, als es waehlbar
-    zu machen und erst beim ersten Aufruf zu scheitern.
+    Vollstaendig heisst: der Ordner enthaelt alle fuenf Pflichtdateien aus
+    PARTS. Ein halb angelegtes System taucht gar nicht erst auf - besser,
+    als es waehlbar zu machen und erst beim ersten Aufruf zu scheitern.
     """
     try:
         return sorted(d for d in PROMPTS_DIR.iterdir()
@@ -120,10 +156,10 @@ def available_systems() -> list[Path]:
 
 
 def estimate_tokens(system_dir: Path) -> int | None:
-    """Ungefaehre Tokenzahl aller vier Dateien zusammen.
+    """Ungefaehre Tokenzahl der Pflichtdateien zusammen.
 
     Die Summe, nicht das Maximum: sie ist zwar keine Kontextgroesse (die
-    vier Prompts laufen nie gleichzeitig), aber ein ehrliches Mass fuer den
+    Prompts laufen nie gleichzeitig), aber ein ehrliches Mass fuer den
     Umfang eines Spielsystems - und darum geht es in der Auswahlliste.
     """
     try:
@@ -148,6 +184,12 @@ class Game:
                             for part in PARTS}
         except OSError as e:
             raise SystemExit(f"Cannot read game system {system_dir.name}: {e}")
+
+        # npc_names.txt ist optional (siehe Modul-Docstring) - anders als
+        # die PARTS-Dateien also mit Rueckfall statt SystemExit.
+        names_file = system_dir / "npc_names.txt"
+        self.npc_names = (names_file.read_text(encoding="utf-8").split()
+                          if names_file.is_file() else list(_FALLBACK_NAMES))
 
         # Die Welt entsteht erst in begin(). Bis dahin gibt es sie nicht -
         # und das soll man auch sehen koennen.
@@ -179,9 +221,10 @@ class Game:
         # __init__(): begin() liest self.start_prompt bei jedem Aufruf frisch,
         # ein Neuversuch nach einem gescheiterten ersten begin() (main.py)
         # kann den Startprompt also aendern, ohne dass die Ersetzung veraltet.
+        init_cls = schema.init_model()
         init_prompt = self.prompts["init.txt"].replace(
             "$START_PROMPT$", self.start_prompt)
-        system = self._system(init_prompt, schema.InitWorld)
+        system = self._system(init_prompt, init_cls)
         user = f"START PROMPT:\n{self.start_prompt}"
 
         self._log_block("INIT / system", system)
@@ -191,7 +234,7 @@ class Game:
             init = self.engine.structured(
                 [{"role": "system", "content": system},
                  {"role": "user", "content": user}],
-                schema.InitWorld)
+                init_cls)
         except Exception as e:
             raise SceneError(str(e)) from e
 
@@ -217,71 +260,85 @@ class Game:
         )
 
     def advance(self, player_input: str, on_actor=None) -> Beat:
-        """Eine Runde spielen: Spieler, dann jeder aktive NPC, dann Erzaehlung.
+        """Eine Runde spielen: Spieler, dann hoechstens ein agentischer Zug,
+        dann Erzaehlung.
 
         Laeuft komplett auf einer KOPIE der Welt (World.copy()) und
-        committet sie erst hier am Ende, NACH erfolgreichem NARRATE. Das ist
-        strenger als die fruehere Zusage "der Chatverlauf bleibt konsistent":
-        eine Runde besteht jetzt aus bis zu zehn Modellaufrufen, und ein
-        Abbruch mittendrin darf keine halb gezogene Welt hinterlassen, in
-        der zwei von drei NPCs schon gehandelt haben.
+        committet sie erst hier am Ende, NACH erfolgreichem NARRATE. Ein
+        Abbruch mittendrin darf keine halb gezogene Welt hinterlassen.
 
-        Fehlerisolierung nach Wichtigkeit (siehe SceneError-Faelle unten):
-        scheitert der Spieler-RESOLVE oder NARRATE, ist die ganze Runde
-        verworfen und der Spieler darf es nochmal versuchen. Scheitert
-        DECIDE oder RESOLVE fuer EINEN NPC, setzt NUR dieser NPC aus - bei
-        bis zu vier NPCs pro Runde macht Null-Toleranz das Spiel unspielbar,
-        und ein NPC, der einmal nicht handelt, ist im Ergebnis nicht von
-        einem NPC zu unterscheiden, der abwartet.
+        Fehlerisolierung nach Wichtigkeit: scheitert der Spieler-RESOLVE
+        oder NARRATE, ist die ganze Runde verworfen und der Spieler darf es
+        nochmal versuchen. Scheitert DECIDE oder RESOLVE fuer die agentische
+        Figur, entfaellt NUR ihr Zug - der Spielerzug und die Erzaehlung
+        laufen trotzdem.
 
         on_actor ist optional und wird - wenn uebergeben - mit einem
-        Klartext-Label aufgerufen, sobald ein NPC an der Reihe ist ("Vogel
-        is acting"). Passt auf main.py's ui.Status.update() als
+        Klartext-Label aufgerufen, sobald die agentische Figur an der Reihe
+        ist ("Vogel is acting"). Passt auf main.py's ui.Status.update() als
         on_actor=lambda label: status.update(label=label).
         """
         if self.world is None:                      # pragma: no cover
             raise SceneError("begin() was never called.")
         world = self.world.copy()
         log: list[str] = []   # abgelehnte Operationen, fuers Debug-Log
+        turn_number = world.scene_number + 1
 
-        # --- 1. Spieler-Resolve ---
-        try:
-            delta = self._resolve(
-                world, actor_id="player", actor_node=world.player_at,
-                action_block=self._resolve_block_player(player_input))
-        except Exception as e:
-            raise SceneError(str(e)) from e
-        log += world.apply_turn("player", delta)
+        # --- 1. Spieler-Resolve, mit Charakterquote-Notbremse ---
+        # Ab Runde 6 (turn_number > 5) ist ein neuer Charakter PFLICHT,
+        # solange die Quote (mindestens 3 Figuren) nicht erfuellt ist. Bis
+        # zu zwei Wiederholungsversuche generieren neue KANDIDATEN - erst
+        # der finale wird angewendet (siehe unten, warum nicht frueher).
+        direction = world.character_quota_status(turn_number)
+        mandatory = turn_number > 5 and bool(direction)
+        delta_p = None
+        attempts = 0
+        for attempts in range(1, 4):   # 1 regulaerer Versuch + max. 2 Wiederholungen
+            try:
+                delta_p = self._resolve(
+                    world, actor_id="player", actor_node=world.player_at,
+                    mode="player",
+                    action_block=self._resolve_block_player(player_input),
+                    direction=direction)
+            except Exception as e:
+                raise SceneError(str(e)) from e
+            if not mandatory or delta_p.characters_introduced:
+                break
+            direction = world.character_quota_status(turn_number)  # bleibt MANDATORY
 
-        # --- 2. NPC-Zuege, stabile INIT-Reihenfolge ---
-        for npc in world.active_npcs_in_order():
-            if npc.status != "active":
-                # Kann durch eine FRUEHERE Figur in DERSELBEN Runde
-                # deaktiviert worden sein (status_changes) - active_npcs_
-                # in_order() wurde vor der Schleife einmal ausgewertet, npc
-                # ist aber eine lebende Referenz in world.characters, ihr
-                # .status ist also aktuell.
-                continue
+        # Generieren-dann-einmal-anwenden statt anwenden-und-bei-Bedarf-
+        # wiederholen: ein zweiter RESOLVE-Aufruf wuerde sonst dieselbe
+        # Spieleraktion gegen eine bereits von Versuch 1 veraenderte Welt
+        # aufloesen (z.B. eine Tuer, die Versuch 1 schon geoeffnet hat) -
+        # das koennte zu doppelten/widerspruechlichen Effekten fuehren.
+        log += world.apply_turn("player", delta_p)
 
+        # Quote NACH dem Anwenden geprueft, nicht nur "hat das Modell
+        # ueberhaupt etwas versucht": ein Versuch kann durchaus vorliegen
+        # (delta_p.characters_introduced nicht leer) und trotzdem an
+        # apply_turn() scheitern (z.B. ein unbekannter Knoten) - dann waere
+        # die Quote weiterhin unerfuellt, ohne dass die Notbremse greift,
+        # wenn man nur auf den blossen Versuch schaute.
+        if mandatory and world.character_quota_status(turn_number):
+            fallback_id = world.spawn_fallback_character(self.npc_names)
+            self._log_block("QUOTA FALLBACK",
+                            f"client-spawned {fallback_id} after {attempts} attempt(s)")
+
+        # --- 2. hoechstens EIN agentischer Zug ---
+        npc = (world.characters.get(world.agentic_char_id)
+              if world.agentic_char_id else None)
+        if npc and npc.status == "active":
             if on_actor:
                 on_actor(f"{npc.name} is acting")
-
             try:
                 decision = self._decide(world, npc)
-            except Exception as e:
-                self._log_block(f"DECIDE {npc.id} failed - skipped", str(e))
-                continue
-
-            npc.aim = decision.aim
-
-            try:
-                delta = self._resolve(
-                    world, actor_id=npc.id, actor_node=npc.at,
+                npc.aim = decision.aim
+                delta_n = self._resolve(
+                    world, actor_id=npc.id, actor_node=npc.at, mode="agentic",
                     action_block=self._resolve_block_npc(npc, decision))
+                log += world.apply_turn(npc.id, delta_n)
             except Exception as e:
-                self._log_block(f"RESOLVE {npc.id} failed - skipped", str(e))
-                continue
-            log += world.apply_turn(npc.id, delta)
+                self._log_block(f"AGENTIC {npc.id} failed - skipped", str(e))
 
         if log:
             self._log_block("REJECTED", "\n".join(log))
@@ -291,7 +348,6 @@ class Game:
             narrate = self._narrate(world, player_input)
         except Exception as e:
             raise SceneError(str(e)) from e
-
         world.scene_number += 1
         # Der Client entscheidet ueber das Ende, nicht das Modell. can_end
         # ist ein Vorschlag: er zaehlt erst ab MIN_SCENES, und die harte
@@ -299,7 +355,11 @@ class Game:
         completed = (world.scene_number >= MAX_SCENES
                      or (narrate.can_end and world.scene_number >= MIN_SCENES))
 
+        # schema.narration_text() statt das Feld direkt zu lesen: die
+        # FELDNAMEN des Ausgabeformats sollen ausschliesslich in schema.py
+        # stehen (siehe dort) - das gilt auch fuer die Leak-Pruefung unten.
         narration, image_prompt = schema.narration_text(narrate)
+        self._check_narration_leak(narration, world)
         world.remember(narration)
 
         self.world = world   # erst jetzt committen
@@ -323,21 +383,35 @@ class Game:
     # ------------------------------------------------------------ intern
 
     def _resolve(self, world: World, actor_id: str, actor_node: str,
-                action_block: str):
-        """EINEN Akteurzug (Spieler oder ein NPC) zu einem Delta aufloesen.
+                mode: str, action_block: str, direction: str = ""):
+        """EINEN Akteurzug (Spieler oder die agentische Figur) zu einem
+        Delta aufloesen.
 
         resolve_cls wird bei JEDEM Aufruf frisch gebaut, nicht einmal pro
         Runde: node_ids/active_ids/die Ausgaenge des Akteurs koennen sich
-        MITTEN in der Runde aendern (ein fruehrer NPC kann einen anderen per
-        status_changes deaktivieren - die Grammatik des naechsten Akteurs
-        darf diese Figur dann nicht mehr als CharId anbieten).
+        MITTEN in der Runde aendern (der Spielerzug kann neue Charaktere
+        oder Raeume erzeugt haben - die Grammatik des agentischen Zuges muss
+        das schon sehen).
+
+        direction ist der optionale STORY-DIRECTION/MANDATORY-Regiehinweis
+        (siehe advance()) - nur bei mode="player" jemals nicht-leer. Wird
+        GETRENNT vom Weltzustand geloggt (nicht nur als Teil des user-
+        Blocks): sonst liesse sich spaeter nicht mehr unterscheiden, was
+        das Modell aus der Welt wusste und was ihm der Client zugefluestert
+        hat.
         """
         resolve_cls = schema.resolve_model(
-            world.node_ids(), world.active_ids(), world.exits_from(actor_node))
+            world.node_ids(), world.active_ids(), world.exits_from(actor_node),
+            mode)
 
-        system = self._system(self.prompts["resolve.txt"], resolve_cls)
-        user = f"WORLD STATE:\n{world.render()}\n\n{action_block}"
+        prompt_file = "resolve_player.txt" if mode == "player" else "resolve_agentic.txt"
+        system = self._system(self.prompts[prompt_file], resolve_cls)
 
+        direction_block = f"{direction}\n\n" if direction else ""
+        user = f"WORLD STATE:\n{world.render()}\n\n{direction_block}{action_block}"
+
+        if direction:
+            self._log_block(f"RESOLVE {actor_id} / story direction", direction)
         self._log_block(f"RESOLVE {actor_id} / user", user)
 
         result = self.engine.structured(
@@ -420,6 +494,21 @@ class Game:
         self._log_thinking()
         self._log_block("NARRATE / result", result.model_dump_json(indent=2))
         return result
+
+    def _check_narration_leak(self, narration: str, world: World) -> None:
+        """Ist das verborgene gemeinsame Ziel der agentischen Figur woertlich
+        in die Erzaehlung durchgesickert?
+
+        Die eigentliche Pruefung sitzt in World.hidden_target_leaked() -
+        story.py fragt nur, ohne den Feldnamen selbst zu kennen (siehe dort,
+        warum das absichtlich getrennt ist). Ein Treffer ist kein
+        Spielabbruch: er wird sichtbar ins Debug-Log geschrieben, damit man
+        ihn beim Playtesting nachschaerfen kann, statt dass er unbemerkt
+        durchrutscht.
+        """
+        if world.hidden_target_leaked(narration):
+            self._log_block("HIDDEN TARGET LEAK",
+                            "the narration names the hidden shared target verbatim")
 
     def _system(self, prompt: str, model_cls) -> str:
         """Spielsystem-Text plus die Feldbeschreibung aus dem Schema.

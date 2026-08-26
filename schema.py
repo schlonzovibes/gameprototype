@@ -52,97 +52,55 @@ from pydantic import BaseModel, Field
 # wiederholt - so kann keine Klasse sie versehentlich anders setzen.
 STRICT = {"extra": "forbid"}
 
-# Ids sind absichtlich einstellig: n1-n9, c1-c9. Das haelt sie kurz (ein
-# Token je Id) und deckelt die Weltgroesse dort, wo sie noch ueberschaubar
-# bleibt. Beim Init existieren die Ids noch nicht, deshalb dort ein Regex -
-# in den dynamischen Modellen spaeter die echte Aufzaehlung.
-NODE_ID = r"^n[1-9]$"
-CHAR_ID = r"^c[1-9]$"
-
 
 # ------------------------------------------------------- statisch: INIT
 
-class InitExit(BaseModel):
-    model_config = STRICT
+def init_model() -> type[BaseModel]:
+    """Der einmalige Weltaufbau - jetzt nur noch EIN Raum, keine Figuren.
 
-    to: str = Field(
-        pattern=NODE_ID,
-        description="id of the node this exit leads to")
-    one_way: bool = Field(
-        description="true if this connection cannot be travelled back")
-    justification: str = Field(
-        description="if one_way is true: the physical reason why return is "
-                    "impossible, in English. Height alone is not a reason - "
-                    "state what blocks the way back. Empty string if the "
-                    "connection is not one-way.")
+    Frueher erzeugte INIT einen vollstaendigen Graphen (7-9 Knoten) samt
+    Charakteren VOR dem ersten Spielzug - eine im Voraus geplante
+    Levelgeometrie, die ein Sprachmodell danach nur noch abschreitet.
+    Playtesting zeigte: entweder haelt sich das Modell daran (dann war das
+    Sprachmodell fuer die Navigation ueberfluessig), oder es weicht ab (dann
+    war der Graph verschwendete Arbeit).
 
+    Jetzt entsteht die Welt WAEHREND des Spielens: INIT liefert nur den
+    Startraum, jeder weitere Knoten entsteht als Nebenprodukt von
+    resolve_model()s new_room-Feld, sobald die Erzaehlung ihn braucht (siehe
+    dort). Der Startraum bekommt seine Id ("n1") vom Client
+    (state.World.from_init), nie vom Modell - deshalb kein id-Feld hier.
 
-class InitNode(BaseModel):
-    model_config = STRICT
+    Parameterlos wie narrate_model() - fuer Namenssymmetrie ueber alle vier
+    Aufruftypen (init/decide/resolve/narrate), auch wenn hier nichts
+    Dynamisches injiziert werden muss.
+    """
+    class Init(BaseModel):
+        model_config = STRICT
 
-    id: str = Field(
-        pattern=NODE_ID,
-        description="unique id, n1 through n9")
-    name: str = Field(
-        description="short place name, in the language of the start prompt")
-    anchor: str = Field(
-        description="permanent physical description in English. Only things "
-                    "that can be named and touched, and that will still be "
-                    "true in twenty scenes. No mood, no events, no people.")
-    exits: list[InitExit] = Field(
-        description="connections leading out of this node")
+        language: str = Field(
+            description="BCP-47 tag of the language the player wrote the "
+                        "start prompt in, e.g. de or en. Every player-facing "
+                        "text in this game must use it.")
+        start_node_name: str = Field(
+            description="short place name, in the language of the start "
+                        "prompt")
+        start_node_anchor: str = Field(
+            description="permanent physical description in English. Only "
+                        "things that can be named and touched, and that "
+                        "will still be true in twenty scenes. No mood, no "
+                        "events, no people.")
+        opening_narration: str = Field(
+            description="scene 1, in the language of the start prompt, "
+                        "second person, 60-120 words. No player action has "
+                        "happened yet, so nothing here may react to one.")
+        opening_image_prompt: str = Field(
+            description="English image description of the opening scene: "
+                        "place, light, materials, perspective. Nameable "
+                        "physical things only. No style words, no "
+                        "negations, no action, no text.")
 
-
-class InitCharacter(BaseModel):
-    model_config = STRICT
-
-    id: str = Field(
-        pattern=CHAR_ID,
-        description="unique id, c1 through c9")
-    name: str = Field(
-        description="name, in the language of the start prompt")
-    at: str = Field(
-        pattern=NODE_ID,
-        description="id of the node this character starts at")
-    agenda: str = Field(
-        description="one English sentence, physically checkable: the "
-                    "world-state this character wants to bring about. This "
-                    "is the only reason they will ever act, and it never "
-                    "changes once play begins.")
-    aim: str = Field(
-        description="one English sentence: the first step toward the "
-                    "agenda. During play the character replaces this every "
-                    "round themselves - write only the opening move, not a "
-                    "plan.")
-
-
-class InitWorld(BaseModel):
-    """Der einmalige Weltaufbau samt Eroeffnungsszene."""
-
-    model_config = STRICT
-
-    language: str = Field(
-        description="BCP-47 tag of the language the player wrote the start "
-                    "prompt in, e.g. de or en. Every player-facing text in "
-                    "this game must use it.")
-    nodes: list[InitNode] = Field(
-        description="7 to 9 locations forming a connected graph")
-    characters: list[InitCharacter] = Field(
-        description="2 to 4 characters, none of them the player")
-    facts: list[str] = Field(
-        description="short English clauses that are true of the whole world "
-                    "and cannot be seen at a single place")
-    player_at: str = Field(
-        pattern=NODE_ID,
-        description="id of the node the player starts at")
-    opening_narration: str = Field(
-        description="scene 1, in the language of the start prompt, second "
-                    "person, 60-120 words. No player action has happened "
-                    "yet, so nothing here may react to one.")
-    opening_image_prompt: str = Field(
-        description="English image description of the opening scene: place, "
-                    "light, materials, perspective. Nameable physical things "
-                    "only. No style words, no negations, no action, no text.")
+    return Init
 
 
 # ------------------------------------------------- dynamisch: pro Zug
@@ -186,34 +144,41 @@ def decide_model(node_ids: tuple[str, ...]) -> type[BaseModel]:
 
 
 def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
-                  actor_exits: tuple[str, ...]) -> type[BaseModel]:
+                  actor_exits: tuple[str, ...],
+                  mode: Literal["player", "agentic"]) -> type[BaseModel]:
     """Das Zustandsdelta EINES Akteurzuges, samt der Ereignisse, die er
-    hinterlaesst.
+    hinterlaesst - und, bei mode="player", der Raeume/Figuren, die dabei
+    neu entstehen.
 
-    Ein einziges Schema fuer Spieler- UND NPC-Zuege - wer gerade handelt,
-    steht im Kontext (der Aufrufer baut die Nachricht entsprechend), nicht
-    im Schema. Anders als frueher schreibt dieser Aufruf keinen Erzaehltext
-    mehr und faellt kein Urteil ueber das Spielende - beides zieht in einen
-    eigenen, spaeteren Aufruf (narrate_model), der nur noch das sieht, was
-    der Spieler an seinem Ort wahrnehmen konnte.
+    ZWEI echte Klassen statt eines optionalen Feldes: nur der Spielerzug
+    darf neue Figuren einfuehren (characters_introduced) - der agentische
+    NPC ist raeumlich so frei wie der Spieler (new_room in beiden Modi),
+    aber die Fuenf-Zuege-Garantie fuer neue Figuren haengt an dem, was der
+    SPIELER erlebt, nicht am Nebenschauplatz eines NPC. "Optional" bliebe
+    hier verboten (siehe Modul-Docstring "alle Felder Pflicht") - deshalb
+    zwei Klassen, keine Optional[list]-Krücke.
+
+    Anders als frueher schreibt dieser Aufruf keinen Erzaehltext mehr und
+    faellt kein Urteil ueber das Spielende - beides zieht in narrate_model,
+    das nur noch sieht, was der Spieler an seinem Ort wahrnehmen konnte.
 
     Alles Neue kommt ueber offene Listen herein (marks_added, facts_added,
-    events, ...). Das Schema selbst waechst dabei NIE - es beschreibt immer
-    nur die Form eines Deltas, nie den Umfang der Welt. Deshalb bleibt die
-    Grammatik in Szene 15 genauso klein wie in Szene 2.
+    events, characters_introduced, ...). Das Schema selbst waechst dabei
+    NIE - es beschreibt immer nur die Form eines Deltas, nie den Umfang der
+    Welt. Deshalb bleibt die Grammatik in Szene 15 genauso klein wie in
+    Szene 2 - GENAU SO wenig waechst sie mit der Anzahl der Knoten: neue
+    Raeume erhoehen node_ids fuer den NAECHSTEN Aufruf, nicht dieses Schema.
 
     actor_exits sind die Ausgaenge des Knotens, an dem der AKTUELL handelnde
-    Akteur GERADE steht (Spieler oder eine Figur) - anders als bei Move.to
-    (andere Figuren stehen woanders, ein gemeinsames Literal waere dort
-    nicht moeglich) kennen wir die Position des Akteurs beim Bauen der
-    Grammatik bereits genau. actor_move_to bekommt deshalb sein eigenes,
-    engeres Literal statt des allgemeinen MoveTo: die Beschreibung sagt
-    immer schon "nur ein Ausgang des aktuellen Knotens", die Grammatik kann
-    es jetzt auch nicht mehr anders.
+    Akteur GERADE steht (Spieler oder die eine agentische Figur) - anders
+    als bei Move.to (andere Figuren stehen woanders, ein gemeinsames
+    Literal waere dort nicht moeglich) kennen wir die Position des Akteurs
+    beim Bauen der Grammatik bereits genau. actor_move_to bekommt deshalb
+    sein eigenes, engeres Literal statt des allgemeinen MoveTo.
     """
     # Literal[()] wirft einen TypeError - ein leeres Tupel ist keine
-    # gueltige Aufzaehlung. Gibt es keine Charaktere (alle tot, oder eine
-    # Welt ohne NPCs), setzen wir einen Platzhalter ein, den es als Id nicht
+    # gueltige Aufzaehlung. Gibt es keine Charaktere (ganz am Spielanfang,
+    # oder alle tot), setzen wir einen Platzhalter ein, den es als Id nicht
     # gibt. Die Grammatik bleibt damit baubar; die Listen, die auf CharId
     # verweisen (moves, status_changes), muessen in diesem Fall leer
     # bleiben - etwas anderes koennte der Resolver gar nicht sinnvoll
@@ -255,29 +220,119 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
             description="short English physical clause, checkable - what "
                         "happened, not how it felt or who noticed it")
 
-    class Resolve(BaseModel):
+    class NewRoom(BaseModel):
+        model_config = STRICT
+        # Pflichtfeld statt NewRoom | None: "kein neuer Raum" ist der leere
+        # String bei name, exakt das Muster, das utterance/justification
+        # schon nutzen ("kein Text" ist der leere String, kein None). Ein
+        # echtes Optional-Feld waere die einzige Ausnahme von "alle Felder
+        # Pflicht, kein Optional" in diesem Schema gewesen.
+        name: str = Field(
+            description="in the language of the start prompt. Empty string "
+                        "if you are not proposing a new room this turn.")
+        anchor: str = Field(
+            description="permanent physical description in English, only "
+                        "nameable/touchable things. Empty string if name is "
+                        "empty.")
+        one_way: bool = Field(
+            description="true if the connection back to where you came from "
+                        "is impossible")
+        justification: str = Field(
+            description="if one_way is true: the physical reason return is "
+                        "impossible, in English. Height alone is not a "
+                        "reason. Empty string otherwise.")
+
+    # Feldreihenfolge ist Generierungsreihenfolge (siehe Modul-Docstring):
+    # new_room ZUERST - er entscheidet, ob actor_move_to ueberhaupt einen
+    # bestehenden Ausgang meint oder "stay" (die Ankunft in einem neuen Raum
+    # laeuft NIE ueber actor_move_to - der neue Raum steht zum Zeitpunkt
+    # dieses Aufrufs noch nicht in actor_exits, kann also in ActorMoveTos
+    # Literal gar nicht auftauchen; new_room mit einem Namen IMPLIZIERT
+    # deshalb selbst die Ankunft dort, siehe state.World.apply_turn).
+    if mode == "player":
+        class NewCharacter(BaseModel):
+            model_config = STRICT
+            name: str = Field(
+                description="in the language of the start prompt")
+            at: NodeId = Field(
+                description="the node they appear at - an existing node, "
+                            "normally the one you are standing in. Cannot "
+                            "be a room you are proposing in this same call "
+                            "(new_room) - that room does not exist until "
+                            "after this call returns.")
+            agenda_draft: str = Field(
+                description="English, one sentence, physically checkable - "
+                            "raw material for their agenda, not a finished "
+                            "character sheet")
+            agenda_target_hint: str = Field(
+                description="English, one noun or short noun phrase: what "
+                            "this agenda points toward. Used by the client "
+                            "to decide things - you never see it again.")
+
+        class ResolvePlayer(BaseModel):
+            model_config = STRICT
+
+            new_room: NewRoom = Field(
+                description="a new room, or an empty-named one if you "
+                            "propose none this turn. If you propose one, "
+                            "its name cannot yet be an exit, so set "
+                            "actor_move_to to 'stay' - arriving there "
+                            "happens automatically.")
+            actor_move_to: ActorMoveTo = Field(
+                description="where the player ends up, or stay. Only an "
+                            "exit of their current node - or 'stay' if you "
+                            "are proposing a new room this turn.")
+            moves: list[Move] = Field(
+                description="OTHER characters moved as a side effect this "
+                            "turn - not the player")
+            status_changes: list[StatusChange] = Field(
+                description="characters whose condition changes this turn")
+            marks_added: list[Mark] = Field(
+                description="lasting physical traces added to places")
+            facts_added: list[str] = Field(
+                description="short English clauses that became true of the "
+                            "whole world and cannot be seen at a single "
+                            "place")
+            characters_introduced: list[NewCharacter] = Field(
+                description="0 to 2 new characters this scene introduces")
+            events: list[Event] = Field(
+                description="1 to 4 short English physical clauses, each "
+                            "tied to the node where it is visible or "
+                            "audible - what actually happened this turn. "
+                            "You do not decide who witnesses it, only "
+                            "where and what.")
+
+        return ResolvePlayer
+
+    class ResolveAgentic(BaseModel):
         model_config = STRICT
 
+        new_room: NewRoom = Field(
+            description="a new room, or an empty-named one if you propose "
+                        "none this turn. If you propose one, its name "
+                        "cannot yet be an exit, so set actor_move_to to "
+                        "'stay' - arriving there happens automatically.")
         actor_move_to: ActorMoveTo = Field(
-            description="where the acting party ends up, or stay. Only an "
-                        "exit of their current node.")
+            description="where you end up, or stay. Only an exit of your "
+                        "current node - or 'stay' if you are proposing a "
+                        "new room this turn.")
         moves: list[Move] = Field(
             description="OTHER characters moved as a side effect this turn "
-                        "- not the acting party, they use actor_move_to")
+                        "- not you, you use actor_move_to")
         status_changes: list[StatusChange] = Field(
             description="characters whose condition changes this turn")
         marks_added: list[Mark] = Field(
             description="lasting physical traces added to places")
         facts_added: list[str] = Field(
-            description="short English clauses that became true of the whole "
-                        "world and cannot be seen at a single place")
+            description="short English clauses that became true of the "
+                        "whole world and cannot be seen at a single place")
         events: list[Event] = Field(
-            description="1 to 4 short English physical clauses, each tied to "
-                        "the node where it is visible or audible - what "
+            description="1 to 4 short English physical clauses, each tied "
+                        "to the node where it is visible or audible - what "
                         "actually happened this turn. You do not decide who "
                         "witnesses it, only where and what.")
 
-    return Resolve
+    return ResolveAgentic
 
 
 def narrate_model() -> type[BaseModel]:

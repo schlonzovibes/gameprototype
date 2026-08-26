@@ -45,13 +45,11 @@ MEMORY_LIMIT = 8
 # Verankerung - inhaltlich steht alles Wichtige im Graphen.
 RECENT_LIMIT = 3
 
-# Obergrenzen im CLIENT, nicht im Prompt (siehe World.apply_turn): ein
-# Resolve-Aufruf darf hoechstens so viele Events melden, eine Runde
-# hoechstens so viele aktive NPCs ziehen lassen. Ein Modell, das mehr
-# liefert, wird gekappt statt abgewiesen - der Ueberschuss landet in der
-# Ablehnungsliste fuers Debug-Log.
+# Obergrenze im CLIENT, nicht im Prompt (siehe World.apply_turn): ein
+# Resolve-Aufruf darf hoechstens so viele Events melden. Ein Modell, das
+# mehr liefert, wird gekappt statt abgewiesen - der Ueberschuss landet in
+# der Ablehnungsliste fuers Debug-Log.
 MAX_EVENTS = 4
-MAX_ACTIVE_NPCS = 4
 
 
 @dataclass
@@ -86,6 +84,9 @@ class Character:
     agenda: str
     aim: str
     status: str = "active"
+    # Genau eine Figur im ganzen Spiel darf True sein - World.add_character()
+    # erzwingt das (wirft, wuerde eine zweite agentische Figur entstehen).
+    is_agentic: bool = False
     memory: list[str] = field(default_factory=list)
 
 
@@ -135,33 +136,36 @@ class World:
     # hat, mitsamt der Spielerposition zum jeweiligen Zeitpunkt.
     round_log: list[RoundEntry] = field(default_factory=list)
 
+    # Obergrenze fuer wachsende Raeume (siehe add_node/can_grow) - jenseits
+    # davon bewegt sich der Spieler nur noch in der bestehenden Topologie,
+    # damit Handlung durch Wiederkehr statt endloses Wachstum entsteht.
+    max_nodes: int = 12
+    # Das verborgene, gemeinsame Ziel von Spieler und agentischem NPC - lebt
+    # NUR hier und in render_for() der agentischen Figur, NIE in render()
+    # oder im Kontext von RESOLVE(actor=player)/NARRATE als Wortlaut.
+    shared_target: str | None = None
+    # Id der EINEN agentischen Figur im ganzen Spiel, oder None, solange
+    # noch keine bestimmt wurde.
+    agentic_char_id: str | None = None
+
     # ------------------------------------------------------------ Aufbau
 
     @classmethod
     def from_init(cls, init) -> World:
-        """Aus dem validierten InitWorld-Objekt eine lebende Welt bauen.
+        """Aus dem validierten Init-Objekt eine lebende Welt bauen.
 
-        Listen werden zu dicts: im Spiel wird fast immer ueber die Id
-        zugegriffen ("wo steht c1?"), nicht durchlaufen.
+        Anders als frueher liefert INIT nur noch Sprache und den Startraum -
+        keine weiteren Knoten, keine Figuren (die entstehen erst waehrend
+        des Spiels, siehe World.add_node/add_character). Die Id "n1" vergibt
+        der Client, nicht das Modell - INIT kennt gar kein Id-Feld mehr.
         """
         return cls(
             language=init.language,
-            nodes={
-                n.id: Node(
-                    id=n.id, name=n.name, anchor=n.anchor,
-                    exits=[Exit(to=e.to, one_way=e.one_way,
-                                justification=e.justification)
-                           for e in n.exits],
-                )
-                for n in init.nodes
-            },
-            characters={
-                c.id: Character(id=c.id, name=c.name, at=c.at,
-                                agenda=c.agenda, aim=c.aim)
-                for c in init.characters
-            },
-            facts=list(init.facts),
-            player_at=init.player_at,
+            nodes={"n1": Node(id="n1", name=init.start_node_name,
+                              anchor=init.start_node_anchor, exits=[])},
+            characters={},
+            facts=[],
+            player_at="n1",
         )
 
     # ------------------------------------------------------------ Abfragen
@@ -179,23 +183,6 @@ class World:
         """
         return tuple(c.id for c in self.characters.values()
                      if c.status == "active")
-
-    def active_npcs_in_order(self) -> list[Character]:
-        """Aktive Figuren in stabiler Reihenfolge - die Zugreihenfolge einer
-        Runde.
-
-        "Stabil" heisst: Einfuegereihenfolge des dicts, die exakt der
-        Reihenfolge aus INIT entspricht (from_init baut characters aus
-        init.characters, einer Liste, und Python-dicts erhalten die
-        Einfuegereihenfolge). Nicht sortiert, nicht gemischt - wer zuerst
-        zieht, hat einen echten Vorteil, und der muss vorhersagbar bleiben.
-
-        MAX_ACTIVE_NPCS ist eine defensive Obergrenze (Brief 8.3); InitWorld
-        begrenzt characters bereits auf 2-4, dieser Fall ist also heute
-        unerreichbar - die Kappung bleibt trotzdem, falls sich das aendert.
-        """
-        npcs = [c for c in self.characters.values() if c.status == "active"]
-        return npcs[:MAX_ACTIVE_NPCS]
 
     def perceivers(self, node_id: str) -> list[Character]:
         """Wer an diesem Ort etwas wahrnehmen koennte - das gesamte
@@ -217,6 +204,110 @@ class World:
         """
         node = self.nodes.get(node_id)
         return tuple(e.to for e in node.exits) if node else ()
+
+    # ------------------------------------------------------------ Wachstum
+
+    def can_grow(self) -> bool:
+        """Darf ueberhaupt noch ein neuer Raum entstehen?
+
+        Getrennt von add_node() selbst: can_grow() ist die Entscheidung
+        (der Aufrufer fragt VOR dem Versuch), add_node() nur die Ausfuehrung
+        und kennt max_nodes gar nicht.
+        """
+        return len(self.nodes) < self.max_nodes
+
+    def add_node(self, name: str, anchor: str, from_node: str,
+                one_way: bool, justification: str) -> str:
+        """Einen neuen Raum anhaengen, verbunden mit from_node.
+
+        Vergibt die naechste freie Id fortlaufend (n1, n2, ...) - Raeume
+        verschwinden nie (siehe Modul-Docstring), deshalb ist
+        len(self.nodes) + 1 garantiert eine frische, nie zuvor vergebene Id.
+
+        Verknuepft automatisch beidseitig, ausser one_way=True - dann fuehrt
+        nur der Weg von from_node zum neuen Raum, keine Rueckkante.
+        """
+        node_id = f"n{len(self.nodes) + 1}"
+        self.nodes[node_id] = Node(id=node_id, name=name, anchor=anchor,
+                                   exits=[])
+        self.nodes[from_node].exits.append(
+            Exit(to=node_id, one_way=one_way, justification=justification))
+        if not one_way:
+            self.nodes[node_id].exits.append(
+                Exit(to=from_node, one_way=False, justification=""))
+        return node_id
+
+    def add_character(self, name: str, at: str, agenda: str,
+                      is_agentic: bool) -> str:
+        """Eine neue Figur anlegen, vergibt die naechste freie Id (c1, c2, ...).
+
+        Wirft, wenn is_agentic=True verlangt wird, obwohl schon eine
+        agentische Figur existiert - das darf laut Spielregel (genau EIN
+        agentischer NPC pro Spiel) nie vorkommen und ist ein
+        Programmierfehler des Aufrufers, kein Spielereignis, das man
+        stillschweigend korrigieren sollte.
+        """
+        if is_agentic and self.agentic_char_id is not None:
+            raise ValueError(
+                "agentic_char_id already set - only one agentic character "
+                "is allowed per game")
+        char_id = f"c{len(self.characters) + 1}"
+        # aim startet leer - die Figur setzt ihren ersten Schritt selbst im
+        # naechsten DECIDE-Aufruf (render_for() zeigt dafuer einen
+        # Platzhaltertext statt einer leeren Zeile, siehe dort).
+        self.characters[char_id] = Character(
+            id=char_id, name=name, at=at, agenda=agenda, aim="",
+            is_agentic=is_agentic)
+        if is_agentic:
+            self.agentic_char_id = char_id
+        return char_id
+
+    def character_quota_status(self, turn_number: int) -> str:
+        """Der Regiehinweis fuer RESOLVE(actor=player): wie viele Figuren
+        fehlen noch, und ist die Frist (Zug 5) schon ueberschritten?
+
+        Weiche Fuehrung bis einschliesslich Zug 5 ("STORY DIRECTION"), harte
+        Pflicht danach ("MANDATORY") - reine Arithmetik auf
+        len(characters)/agentic_char_id/turn_number, kein Modellzugriff.
+        Leerer String, sobald die Quote (mindestens 3 Figuren) erfuellt ist
+        - kein leeres Feld im Kontext, einfach nichts an dieser Stelle.
+        """
+        needed = max(0, 3 - len(self.characters))
+        if needed == 0:
+            return ""
+
+        if turn_number > 5:
+            # Das Modell setzt is_agentic NICHT selbst (das Feld existiert
+            # im Schema gar nicht - die Auswahl trifft der Client in
+            # apply_turn, siehe dort). Der Pflichttext verlangt deshalb nur
+            # eine dritte Figur mit brauchbarem agenda_target_hint, nie
+            # is_agentic direkt.
+            return "MANDATORY: this call MUST introduce a new character."
+
+        turns_left = max(0, 5 - turn_number)
+        plural = "s" if needed != 1 else ""
+        return (f"STORY DIRECTION: {needed} more character{plural} must "
+                f"appear by turn 5. {turns_left} turn(s) remain. Weave in "
+                f"an opportunity for a new character now.")
+
+    def spawn_fallback_character(self, names_pool: list[str]) -> str:
+        """Client-seitiger Notanker, wenn selbst die Notbremse (3 gescheiterte
+        RESOLVE-Versuche) keine neue Figur hervorbringt.
+
+        Kein Modellaufruf - ein schmuckloser NPC ist besser als ein
+        gebrochenes Versprechen an den Spieler. Ohne echten
+        agenda_target_hint gibt es kein sinnvolles shared_target; bleibt
+        dann leer statt geraten - der agentische Zug faellt fuer diese
+        Figur inhaltlich schwach aus, aber das Spiel bricht nicht ab.
+        """
+        used = {c.name for c in self.characters.values()}
+        name = next((n for n in names_pool if n not in used), "Stranger")
+        make_agentic = self.agentic_char_id is None
+        char_id = self.add_character(name=name, at=self.player_at,
+                                     agenda="", is_agentic=make_agentic)
+        if make_agentic and self.shared_target is None:
+            self.shared_target = ""
+        return char_id
 
     # ------------------------------------------------------------ Rendern
 
@@ -271,13 +362,25 @@ class World:
           - die globalen facts (die sieht man nirgends "an einem Ort")
           - die Spielerposition, wenn er woanders ist
           - das Rundenprotokoll (das ist Erzaehler-Material, nicht ihres)
+
+        EINE Ausnahme, nur fuer die agentische Figur (char.id ==
+        self.agentic_char_id): eine zusaetzliche Zeile mit shared_target,
+        dem verborgenen gemeinsamen Ziel mit dem Spieler. Diese Zeile geht
+        NUR hierher - nie in render() (das sehen RESOLVE UND der Spieler-
+        Kontext) und nie in narrate_model()s Kontext. Ohne sie koennte diese
+        eine Figur ihr shared_target nicht konsistent verfolgen; mit ihr
+        NUR hier bleibt es fuer jeden anderen Aufruf unsichtbar.
         """
         node = self.nodes[char.at]
 
         lines = [
             f"YOU ARE {char.id} {char.name}",
             f"YOUR AGENDA: {char.agenda}",
-            f"YOUR CURRENT AIM: {char.aim}",
+            f"YOUR CURRENT AIM: {char.aim or '(not yet set - decide one now)'}",
+        ]
+        if char.id == self.agentic_char_id and self.shared_target:
+            lines.append(f"YOUR HIDDEN AIM RELATES TO: {self.shared_target}")
+        lines += [
             "",
             f'YOU ARE AT {node.id} "{node.name}"',
             f"  {node.anchor}",
@@ -318,6 +421,23 @@ class World:
         if present:
             lines.append("PRESENT: " + ", ".join(c.name for c in present))
         return "\n".join(lines)
+
+    def hidden_target_leaked(self, narrator_text: str) -> bool:
+        """Ist das verborgene gemeinsame Ziel woertlich in narrator_text
+        durchgesickert?
+
+        Diese Pruefung lebt bewusst HIER und nicht in story.py, obwohl sie
+        story.Game._narrate aufruft: der Feldname des verborgenen Ziels
+        darf ausserhalb von schema.py/state.py nirgends im Wortlaut
+        auftauchen (Debug-Log-Grep, siehe tests/test_no_leaked_field_names.py)
+        - waere die Pruefung in story.py, muesste sie dort auf den Namen
+        zugreifen und ihn damit selbst schreiben.
+
+        Bewusst nur ein einfacher Teilstring-Vergleich, keine Nominalphrasen-
+        Extraktion - Letzteres waere ein eigenes Textverstehens-Problem.
+        """
+        target = self.shared_target
+        return bool(target) and target.lower() in narrator_text.lower()
 
     def remember(self, narration: str) -> None:
         """Eine neue Erzaehlung als stilistischen Anker vormerken.
@@ -380,23 +500,41 @@ class World:
         """Das Delta EINES Akteurzuges anwenden. Rueckgabe: was abgelehnt
         wurde.
 
-        Ersetzt das fruehere apply(): eine Runde besteht jetzt aus mehreren
-        Aufrufen hier (einmal fuer den Spieler, einmal je aktivem NPC), statt
-        aus einem einzigen. Hier - und nur hier - waechst die Welt. Die
-        Rueckgabeliste ist kein Fehlerkanal, sondern eine Beobachtung fuers
-        Debug-Log: sie zeigt, wo das Modell etwas wollte, was der Graph nicht
-        hergibt.
+        Eine Runde besteht aus hoechstens zwei Aufrufen hier (Spieler, dann
+        - falls vorhanden - die eine agentische Figur). Hier - und nur hier
+        - waechst die Welt. Die Rueckgabeliste ist kein Fehlerkanal, sondern
+        eine Beobachtung fuers Debug-Log: sie zeigt, wo das Modell etwas
+        wollte, was der Graph nicht hergibt.
 
         actor_id ist "player" oder eine CharId - der Akteur, dessen Delta
-        das hier ist. scene_number wird HIER NICHT mehr erhoeht: eine Runde
-        besteht aus mehreren apply_turn()-Aufrufen, der Aufrufer (Game.advance)
-        erhoeht ihn genau einmal, am Rundenende.
+        das hier ist. scene_number wird HIER NICHT mehr erhoeht: der
+        Aufrufer (Game.advance) erhoeht ihn genau einmal, am Rundenende.
         """
         rejected: list[str] = []
         actor_node = self._actor_node_id(actor_id)
 
-        # --- Bewegung des Akteurs ---
-        if delta.actor_move_to != "stay":
+        # --- Neuer Raum (ZUERST, siehe schema.resolve_model) ---
+        # Ein neuer Raum kann in actor_move_to gar nicht als Ziel auftauchen
+        # - seine Id existiert erst NACH diesem Aufruf, die Grammatik von
+        # actor_move_to wurde aber VOR dem Aufruf aus den bestehenden
+        # Ausgaengen gebaut. delta.new_room mit einem Namen IMPLIZIERT
+        # deshalb selbst die Ankunft dort; actor_move_to wird in diesem Fall
+        # ignoriert (resolve_player.txt/resolve_agentic.txt weisen das
+        # Modell an, es dann auf "stay" zu setzen).
+        if delta.new_room.name:
+            if self.can_grow():
+                new_id = self.add_node(
+                    delta.new_room.name, delta.new_room.anchor,
+                    from_node=actor_node, one_way=delta.new_room.one_way,
+                    justification=delta.new_room.justification)
+                if actor_id == "player":
+                    self.player_at = new_id
+                else:
+                    self.characters[actor_id].at = new_id
+            else:
+                rejected.append(
+                    f"new_room: max_nodes ({self.max_nodes}) reached, discarded")
+        elif delta.actor_move_to != "stay":
             if delta.actor_move_to in self.exits_from(actor_node):
                 if actor_id == "player":
                     self.player_at = delta.actor_move_to
@@ -456,6 +594,11 @@ class World:
             else:
                 self.facts.append(fact)
 
+        # --- Neue Figuren (nur mode="player" - das Feld existiert bei
+        # mode="agentic" im Schema gar nicht, siehe schema.resolve_model) ---
+        if hasattr(delta, "characters_introduced"):
+            self._introduce_characters(delta.characters_introduced, rejected)
+
         # --- Ereignisse: Erinnerungen verteilen, Rundenprotokoll fuehren ---
         # Auf MAX_EVENTS gekappt - eine Obergrenze im Client, nicht im
         # Schema/Prompt (Brief 8.3). Ueberschuss wird verworfen und geloggt,
@@ -499,3 +642,57 @@ class World:
                 f"events: {len(delta.events) - MAX_EVENTS} dropped, over MAX_EVENTS")
 
         return rejected
+
+    def _introduce_characters(self, new_chars, rejected: list[str]) -> None:
+        """0-2 vorgeschlagene Figuren tatsaechlich anlegen.
+
+        Wird der DRITTE Charakter insgesamt eingefuehrt (und existiert noch
+        keine agentische Figur), waehlt der Client - NICHT das Modell - wer
+        davon agentisch wird (Spielregel: genau einer im ganzen Spiel).
+        Stecken mehrere Kandidaten im selben Aufruf, entscheidet
+        _pick_agentic_index() zwischen ihnen.
+        """
+        new_chars = list(new_chars[:2])   # 0-2 laut Schema, defensiv gekappt
+
+        would_complete_trio = (self.agentic_char_id is None
+                               and len(self.characters) == 2)
+        if would_complete_trio and len(new_chars) > 1:
+            idx = self._pick_agentic_index(new_chars)
+            new_chars[0], new_chars[idx] = new_chars[idx], new_chars[0]
+
+        for nc in new_chars:
+            if nc.at not in self.nodes:
+                rejected.append(f"character {nc.name}: unknown node {nc.at}")
+                continue
+            make_agentic = (self.agentic_char_id is None
+                            and len(self.characters) == 2)
+            char_id = self.add_character(nc.name, nc.at, nc.agenda_draft,
+                                         make_agentic)
+            if make_agentic:
+                self.shared_target = self._derive_shared_target(
+                    nc.agenda_target_hint)
+
+    def _pick_agentic_index(self, candidates: list) -> int:
+        """Welcher von mehreren gleichzeitig vorgeschlagenen Kandidaten wird
+        die agentische Figur?
+
+        Naeherung an "zeigt am konkretesten auf etwas, das bereits in der
+        Welt existiert" (Brief 3.3): ein simpler, deterministischer
+        Teilstring-Abgleich von agenda_target_hint gegen bestehende
+        Knotennamen/-anchors - kein echtes Konkretheits-Urteil (das waere
+        ein eigener Modellaufruf). Kein Treffer oder mehrere: der erste
+        Kandidat in Listenreihenfolge gewinnt.
+        """
+        world_text = " ".join(n.name.lower() + " " + n.anchor.lower()
+                              for n in self.nodes.values())
+        for i, c in enumerate(candidates):
+            if c.agenda_target_hint.lower() in world_text:
+                return i
+        return 0
+
+    def _derive_shared_target(self, hint: str) -> str:
+        """agenda_target_hint ist bereits die knappe Nominalphrase (siehe
+        schema.py, NewCharacter) - hier nur benannt, damit ein spaeterer,
+        aufwendigerer Ableitungsschritt (falls je noetig) einen einzigen
+        Ort haette, an dem er entstuende."""
+        return hint

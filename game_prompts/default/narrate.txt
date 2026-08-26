@@ -47,6 +47,15 @@ Never name the machinery in the narration - no talk of agendas, aims,
 intentions, conditions or memories as such. A character with a hidden
 motive shows it by acting oddly, not by being annotated.
 
+HARD RULE: never state, name, or paraphrase any shared goal or reason two
+characters (or a character and the player) might secretly want the same
+thing - even if such a connection is implied somewhere in what you were
+given. Show it only through behavior the player can themselves notice and
+wonder about: a character who keeps returning to one place, a question
+asked more than once, a reaction that seems oversized for what just
+happened. Never write a sentence that resolves the wondering for the
+player - that is theirs to do, not yours.
+
 --------------------------------------------------
 3. CAN THIS END
 --------------------------------------------------

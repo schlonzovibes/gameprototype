@@ -9,6 +9,17 @@ import unittest
 import schema
 
 
+class InitModelTest(unittest.TestCase):
+    def test_no_graph_no_characters(self):
+        """INIT erzeugt nur noch den Startraum, keinen Graphen, keine
+        Figuren (siehe Brief 8.1)."""
+        Init = schema.init_model()
+        self.assertEqual(
+            list(Init.model_fields.keys()),
+            ["language", "start_node_name", "start_node_anchor",
+             "opening_narration", "opening_image_prompt"])
+
+
 class DecideModelTest(unittest.TestCase):
     def test_field_order_is_semantic(self):
         """aim steht vor intent - die Absicht wird auf dem frisch gesetzten
@@ -23,26 +34,55 @@ class DecideModelTest(unittest.TestCase):
 
 
 class ResolveModelTest(unittest.TestCase):
-    def test_field_order(self):
-        Resolve = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",))
+    def test_player_mode_has_characters_introduced(self):
+        Player = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "player")
+        self.assertIn("characters_introduced", Player.model_fields)
+
+    def test_agentic_mode_has_no_characters_introduced(self):
+        """Die Fuenf-Zuege-Garantie haengt am Spielerzug, nicht am
+        Nebenschauplatz der agentischen Figur (Brief 5.1) - das Feld
+        existiert bei mode="agentic" im Schema gar nicht, nicht bloss
+        leer."""
+        Agentic = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "agentic")
+        self.assertNotIn("characters_introduced", Agentic.model_fields)
+
+    def test_field_order_player(self):
+        Player = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "player")
         self.assertEqual(
-            list(Resolve.model_fields.keys()),
-            ["actor_move_to", "moves", "status_changes", "marks_added",
-             "facts_added", "events"])
+            list(Player.model_fields.keys()),
+            ["new_room", "actor_move_to", "moves", "status_changes",
+             "marks_added", "facts_added", "characters_introduced", "events"])
+
+    def test_field_order_agentic(self):
+        Agentic = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "agentic")
+        self.assertEqual(
+            list(Agentic.model_fields.keys()),
+            ["new_room", "actor_move_to", "moves", "status_changes",
+             "marks_added", "facts_added", "events"])
+
+    def test_new_room_is_required_not_optional(self):
+        """Regression fuer die Optional-Korrektur ggue. dem Brief-Wortlaut:
+        new_room ist ein Pflichtfeld (leerer name-String signalisiert
+        "keiner"), kein echtes Optional/None-Feld."""
+        Player = schema.resolve_model(("n1",), ("c1",), ("n1",), "player")
+        self.assertTrue(Player.model_fields["new_room"].is_required())
+        schema_dict = Player.model_json_schema()
+        # Kein "anyOf"/null-Branch im generierten JSON-Schema fuer new_room.
+        new_room_schema = schema_dict["properties"]["new_room"]
+        self.assertNotIn("anyOf", new_room_schema)
 
     def test_actor_move_to_limited_to_actor_exits(self):
         """actor_move_to darf NUR die uebergebenen Ausgaenge des Akteurs
-        annehmen, nicht jeden Knoten der Welt (Regression fuer den
-        PlayerMoveTo/ActorMoveTo-Fix)."""
-        Resolve = schema.resolve_model(("n1", "n2", "n3"), ("c1",), ("n2",))
-        enum = Resolve.model_json_schema()["properties"]["actor_move_to"]["enum"]
+        annehmen, nicht jeden Knoten der Welt."""
+        Player = schema.resolve_model(("n1", "n2", "n3"), ("c1",), ("n2",), "player")
+        enum = Player.model_json_schema()["properties"]["actor_move_to"]["enum"]
         self.assertEqual(set(enum), {"n2", "stay"})
 
     def test_builds_without_characters(self):
         """Keine aktiven Figuren (char_ids leer) - darf nicht mit
         Literal[()]-TypeError abstuerzen."""
-        Resolve = schema.resolve_model(("n1",), (), ("n1",))
-        Resolve.model_json_schema()
+        Agentic = schema.resolve_model(("n1",), (), ("n1",), "agentic")
+        Agentic.model_json_schema()
 
 
 class NarrateModelTest(unittest.TestCase):
@@ -51,12 +91,6 @@ class NarrateModelTest(unittest.TestCase):
         self.assertEqual(list(Narrate.model_fields.keys()),
                          ["can_end", "narrator_text", "image_prompt"])
         Narrate.model_json_schema()
-
-
-class InitCharacterTest(unittest.TestCase):
-    def test_has_agenda_and_aim_not_goal(self):
-        self.assertEqual(list(schema.InitCharacter.model_fields.keys()),
-                         ["id", "name", "at", "agenda", "aim"])
 
 
 if __name__ == "__main__":
