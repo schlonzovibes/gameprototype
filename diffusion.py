@@ -98,17 +98,42 @@ def _device():
 
 
 def _silence_libraries() -> None:
-    """diffusers und transformers auf "nur echte Fehler" stellen.
+    """diffusers, transformers, torch und torchao auf "nur echte Fehler" stellen.
 
-    Nicht aus Bequemlichkeit: die beiden schreiben ihre Meldungen direkt auf
-    den Bildschirm, mitten in unser sorgfaeltig positioniertes Layout. Eine
-    Zeile wie "Guidance scale 2.5 is ignored for step-wise distilled models."
-    landet dann quer im Bild und zerstoert Kopfzeile oder Szene.
+    Nicht aus Bequemlichkeit: sie schreiben ihre Meldungen direkt auf den
+    Bildschirm, mitten in unser sorgfaeltig positioniertes Layout. Eine Zeile
+    wie "Guidance scale 2.5 is ignored for step-wise distilled models." landet
+    dann quer im Bild und zerstoert Kopfzeile oder Szene. Genauso Zeilen wie
+    "W0826 ...] <enum 'KernelPreference'> is ... deprecated" (torch, ueber
+    torch.utils._pytree beim Registrieren von torchao-Enums) oder
+    "`Siglip2ImageProcessorFast` is deprecated" (transformers) - beides
+    Deprecation-Hinweise, keine Fehler.
+
+    WICHTIG: diese Funktion muss laufen, BEVOR torch/diffusers/transformers
+    importiert werden (siehe load() unten). Ein Teil dieser Meldungen
+    entsteht schon WAEHREND des Imports (torchao registriert seine Enums als
+    Pytree-Konstanten beim Laden der diffusers-Quantisierungsmodule) - kommt
+    _silence_libraries() erst danach, ist die Meldung laengst geschrieben.
 
     Echte Fehler kommen weiterhin durch - nur Hinweise und Warnungen nicht.
     Wenn beim Bild etwas schiefgeht, faengt paint() in main.py das ohnehin
     als Exception ab.
     """
+    import logging
+    import warnings
+
+    # warnings.warn()-Meldungen (u.a. die Deprecation-Hinweise aus
+    # transformers) laufen am logging-Modul komplett vorbei - ohne diesen
+    # Filter kaemen sie trotz stummgeschalteter Logger durch.
+    warnings.filterwarnings("ignore")
+
+    # torch und torchao schreiben eigene Hinweise ueber das logging-Modul,
+    # mit einem glog-aehnlichen Format ("W0826 HH:MM:SS.ffffff PID
+    # datei:zeile] ..."). Die "torch"-Logger-Ebene auf ERROR schluckt auch
+    # Kindlogger wie torch.utils._pytree, die keine eigene Ebene setzen.
+    logging.getLogger("torch").setLevel(logging.ERROR)
+    logging.getLogger("torchao").setLevel(logging.ERROR)
+
     # Jede Bibliothek einzeln in try/except: schlaegt eine fehl (andere
     # Version, umbenannte API), sollen die anderen trotzdem still werden.
     try:
@@ -145,10 +170,16 @@ class Diffusion:
 
     def load(self) -> None:
         """Das Modell in den Speicher laden. Dauert je nach Groesse Minuten."""
+        # VOR den Imports: ein Teil der Deprecation-Hinweise (torchao ueber
+        # torch.utils._pytree, transformers-Bildprozessoren) entsteht schon
+        # als Nebeneffekt DIESER Imports, nicht erst beim spaeteren
+        # from_pretrained(). Stuende _silence_libraries() erst danach, waeren
+        # diese Zeilen schon geschrieben - siehe die Erklaerung dort.
+        _silence_libraries()
+
         import torch
         from diffusers import AutoPipelineForText2Image
 
-        _silence_libraries()
         device, dtype = _device()
 
         # startswith("Flux2") trifft Flux2KleinPipeline und Verwandte.
