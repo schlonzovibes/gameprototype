@@ -104,10 +104,16 @@ class InitCharacter(BaseModel):
     at: str = Field(
         pattern=NODE_ID,
         description="id of the node this character starts at")
-    goal: str = Field(
-        description="one English sentence: what this character wants. This "
-                    "is the only reason they will ever act. Make it concrete "
-                    "enough to be reached or refused.")
+    agenda: str = Field(
+        description="one English sentence, physically checkable: the "
+                    "world-state this character wants to bring about. This "
+                    "is the only reason they will ever act, and it never "
+                    "changes once play begins.")
+    aim: str = Field(
+        description="one English sentence: the first step toward the "
+                    "agenda. During play the character replaces this every "
+                    "round themselves - write only the opening move, not a "
+                    "plan.")
 
 
 class InitWorld(BaseModel):
@@ -141,22 +147,31 @@ class InitWorld(BaseModel):
 
 # ------------------------------------------------- dynamisch: pro Zug
 
-def intent_model(node_ids: tuple[str, ...]) -> type[BaseModel]:
+def decide_model(node_ids: tuple[str, ...]) -> type[BaseModel]:
     """Was EIN Charakter als Naechstes will - aus seiner Sicht allein.
 
-    Bewusst winzig: drei Felder, kein Zustandsdelta, kein Erzaehltext. Diese
+    Bewusst klein: vier Felder, kein Zustandsdelta, kein Erzaehltext. Diese
     Figur entscheidet nicht, ob ihr Vorhaben gelingt - das tut erst der
     Resolver, der den ganzen Zustand kennt. Sie will nur etwas.
+
+    aim steht bewusst ZUERST, vor intent: die Figur setzt ihren naechsten
+    Schritt neu (oder bestaetigt den alten), und der intent dieser Runde
+    folgt DARAUS - nicht umgekehrt. Genau wie beim Zustandsdelta vor der
+    Szene ist die Feldreihenfolge hier Design, nicht Zufall.
     """
     NodeId = Literal[node_ids]                  # type: ignore[valid-type]
     MoveTo = Literal[node_ids + ("stay",)]      # type: ignore[valid-type]
 
-    class Intent(BaseModel):
+    class Decide(BaseModel):
         model_config = STRICT
 
+        aim: str = Field(
+            description="your next step toward your agenda, replacing your "
+                        "previous one - English, one sentence")
         intent: str = Field(
             description="one short English clause: what you are trying to do "
-                        "right now. Physical and checkable, not a feeling.")
+                        "right now, following from the aim above. Physical "
+                        "and checkable, not a feeling.")
         utterance: str = Field(
             description="what you say out loud, in the game language. Empty "
                         "string if you stay silent.")
@@ -165,41 +180,50 @@ def intent_model(node_ids: tuple[str, ...]) -> type[BaseModel]:
 
     # NodeId wird nur zur Herleitung von MoveTo gebraucht; die Zuweisung
     # haelt Linter davon ab, sie als unbenutzt zu melden.
-    Intent.__doc__ = f"intent of one character among nodes {node_ids}"
+    Decide.__doc__ = f"decision of one character among nodes {node_ids}"
     del NodeId
-    return Intent
+    return Decide
 
 
-def turn_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
-               player_exits: tuple[str, ...]) -> type[BaseModel]:
-    """Das Zustandsdelta eines Zuges, gefolgt von der Szene.
+def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
+                  actor_exits: tuple[str, ...]) -> type[BaseModel]:
+    """Das Zustandsdelta EINES Akteurzuges, samt der Ereignisse, die er
+    hinterlaesst.
+
+    Ein einziges Schema fuer Spieler- UND NPC-Zuege - wer gerade handelt,
+    steht im Kontext (der Aufrufer baut die Nachricht entsprechend), nicht
+    im Schema. Anders als frueher schreibt dieser Aufruf keinen Erzaehltext
+    mehr und faellt kein Urteil ueber das Spielende - beides zieht in einen
+    eigenen, spaeteren Aufruf (narrate_model), der nur noch das sieht, was
+    der Spieler an seinem Ort wahrnehmen konnte.
 
     Alles Neue kommt ueber offene Listen herein (marks_added, facts_added,
-    ...). Das Schema selbst waechst dabei NIE - es beschreibt immer nur die
-    Form eines Deltas, nie den Umfang der Welt. Deshalb bleibt die Grammatik
-    in Szene 15 genauso klein wie in Szene 2.
+    events, ...). Das Schema selbst waechst dabei NIE - es beschreibt immer
+    nur die Form eines Deltas, nie den Umfang der Welt. Deshalb bleibt die
+    Grammatik in Szene 15 genauso klein wie in Szene 2.
 
-    player_exits sind die Ausgaenge des Knotens, an dem der Spieler GERADE
-    steht - anders als bei Move.to (jede Figur steht woanders, ein
-    gemeinsames Literal waere dort nicht moeglich) kennen wir die Position
-    des Spielers beim Bauen der Grammatik bereits genau. player_move_to
-    bekommt deshalb sein eigenes, engeres Literal statt des allgemeinen
-    MoveTo: die Beschreibung sagte immer schon "nur ein Ausgang des
-    aktuellen Knotens", jetzt kann die Grammatik es auch nicht mehr anders.
+    actor_exits sind die Ausgaenge des Knotens, an dem der AKTUELL handelnde
+    Akteur GERADE steht (Spieler oder eine Figur) - anders als bei Move.to
+    (andere Figuren stehen woanders, ein gemeinsames Literal waere dort
+    nicht moeglich) kennen wir die Position des Akteurs beim Bauen der
+    Grammatik bereits genau. actor_move_to bekommt deshalb sein eigenes,
+    engeres Literal statt des allgemeinen MoveTo: die Beschreibung sagt
+    immer schon "nur ein Ausgang des aktuellen Knotens", die Grammatik kann
+    es jetzt auch nicht mehr anders.
     """
     # Literal[()] wirft einen TypeError - ein leeres Tupel ist keine
     # gueltige Aufzaehlung. Gibt es keine Charaktere (alle tot, oder eine
     # Welt ohne NPCs), setzen wir einen Platzhalter ein, den es als Id nicht
     # gibt. Die Grammatik bleibt damit baubar; die Listen, die auf CharId
-    # verweisen (moves, status_changes, memories_added), muessen in diesem
-    # Fall leer bleiben - etwas anderes koennte der Resolver gar nicht
-    # sinnvoll fuellen, und World.apply() wuerde es ohnehin ablehnen.
+    # verweisen (moves, status_changes), muessen in diesem Fall leer
+    # bleiben - etwas anderes koennte der Resolver gar nicht sinnvoll
+    # fuellen, und World.apply_turn() wuerde es ohnehin ablehnen.
     char_ids = char_ids or ("none",)
 
     NodeId = Literal[node_ids]                  # type: ignore[valid-type]
     CharId = Literal[char_ids]                  # type: ignore[valid-type]
     MoveTo = Literal[node_ids + ("stay",)]      # type: ignore[valid-type]
-    PlayerMoveTo = Literal[player_exits + ("stay",)]  # type: ignore[valid-type]
+    ActorMoveTo = Literal[actor_exits + ("stay",)]  # type: ignore[valid-type]
     Status = Literal["active", "disabled", "dead"]
 
     class Move(BaseModel):
@@ -216,15 +240,6 @@ def turn_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
                         "change to this place, e.g. 'the hatch stands open'. "
                         "Only what actually remains.")
 
-    class Memory(BaseModel):
-        model_config = STRICT
-        character: CharId = Field(description="who remembers")
-        clause: str = Field(
-            description="short English clause about what the player did, as "
-                        "this character witnessed it. Precise, not "
-                        "interpreted - the player must recognise their own "
-                        "decision in it later.")
-
     class StatusChange(BaseModel):
         model_config = STRICT
         character: CharId = Field(description="whose condition changes")
@@ -232,25 +247,23 @@ def turn_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
             description="active: acts normally. disabled: present but unable "
                         "to act. dead: gone for good.")
 
-    class Scene(BaseModel):
+    class Event(BaseModel):
         model_config = STRICT
-        narrator_text: str = Field(
-            description="the scene as the player reads it, in the game "
-                        "language, second person, 60-120 words. Report only "
-                        "what the delta above or the given state contains.")
-        image_prompt: str = Field(
-            description="English image description: place, light, materials, "
-                        "perspective. Nameable physical things only. No style "
-                        "words, no negations, no action, no text.")
+        node: NodeId = Field(
+            description="where this is visible or audible")
+        clause: str = Field(
+            description="short English physical clause, checkable - what "
+                        "happened, not how it felt or who noticed it")
 
-    class Turn(BaseModel):
+    class Resolve(BaseModel):
         model_config = STRICT
 
-        player_move_to: PlayerMoveTo = Field(
-            description="where the player ends up, or stay. Only an exit of "
-                        "their current node.")
+        actor_move_to: ActorMoveTo = Field(
+            description="where the acting party ends up, or stay. Only an "
+                        "exit of their current node.")
         moves: list[Move] = Field(
-            description="characters changing place this turn")
+            description="OTHER characters moved as a side effect this turn "
+                        "- not the acting party, they use actor_move_to")
         status_changes: list[StatusChange] = Field(
             description="characters whose condition changes this turn")
         marks_added: list[Mark] = Field(
@@ -258,36 +271,63 @@ def turn_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
         facts_added: list[str] = Field(
             description="short English clauses that became true of the whole "
                         "world and cannot be seen at a single place")
-        memories_added: list[Memory] = Field(
-            description="what characters keep of the player's action")
+        events: list[Event] = Field(
+            description="1 to 4 short English physical clauses, each tied to "
+                        "the node where it is visible or audible - what "
+                        "actually happened this turn. You do not decide who "
+                        "witnesses it, only where and what.")
+
+    return Resolve
+
+
+def narrate_model() -> type[BaseModel]:
+    """Was der Spieler zu lesen bekommt - erst NACHDEM alle Akteure dieser
+    Runde aufgeloest sind.
+
+    Statisch, ohne Ids: dieser Aufruf kennt keine Knoten- oder Figuren-Ids,
+    weil er sie nicht braucht - er sieht nur noch die gefilterte
+    Ereignisliste und den Ort des Spielers, beides bereits als Text (siehe
+    story.Game._narrate). Das ist Absicht: es gibt so keinen Weg, versehentlich
+    eine Id oder ein Feld zu referenzieren, das der Spieler nicht sehen darf.
+    """
+    class Narrate(BaseModel):
+        model_config = STRICT
+
         can_end: bool = Field(
             description="true only if the situation has closed on its own. "
                         "This is a report, not a decision - whether the game "
                         "actually ends is decided elsewhere.")
-        scene: Scene = Field(
-            description="written last, once the delta above is fixed")
+        narrator_text: str = Field(
+            description="the scene as the player reads it, in the game "
+                        "language, second person, 60-120 words. Report only "
+                        "what you were given - nothing else happened, as far "
+                        "as the player is concerned.")
+        image_prompt: str = Field(
+            description="English image description: place, light, materials, "
+                        "perspective. Nameable physical things only. No style "
+                        "words, no negations, no action, no text.")
 
-    return Turn
+    return Narrate
 
 
 # ------------------------------------------------------------- Zugriffe
 
-def scene_text(turn) -> tuple[str, str]:
-    """(Erzaehltext, Bildprompt) eines Zuges.
+def narration_text(narrate) -> tuple[str, str]:
+    """(Erzaehltext, Bildprompt) einer erzaehlten Szene.
 
-    Warum ein Zugriff statt turn.scene.narrator_text beim Aufrufer? Damit
-    die FELDNAMEN des Ausgabeformats ausschliesslich in dieser Datei stehen.
+    Warum ein Zugriff statt narrate.narrator_text beim Aufrufer? Damit die
+    FELDNAMEN des Ausgabeformats ausschliesslich in dieser Datei stehen.
     Genau darum ging der ganze Umbau: der Contract existierte frueher an
     drei Orten und lief auseinander. Ein Feldname, der auch nur in einer
     zweiten Datei auftaucht, ist der Anfang desselben Problems.
 
     Wer das Feld umbenennt, aendert es hier - und sonst nirgends.
     """
-    return turn.scene.narrator_text, turn.scene.image_prompt
+    return narrate.narrator_text, narrate.image_prompt
 
 
 def opening_text(init) -> tuple[str, str]:
-    """(Erzaehltext, Bildprompt) der Eroeffnungsszene - siehe scene_text()."""
+    """(Erzaehltext, Bildprompt) der Eroeffnungsszene - siehe narration_text()."""
     return init.opening_narration, init.opening_image_prompt
 
 

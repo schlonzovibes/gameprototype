@@ -21,12 +21,26 @@ prefix-cachebar - der Server prefillt ihn einmal und danach nie wieder.
 === Ein Spielsystem ist ein ORDNER ===
 
     game_prompts/<name>/init.txt      Weltgenerator, laeuft genau einmal
-    game_prompts/<name>/intent.txt    eine Figur entscheidet fuer sich
-    game_prompts/<name>/resolve.txt   Aufloesung und Erzaehlung
+    game_prompts/<name>/decide.txt    eine Figur entscheidet fuer sich
+    game_prompts/<name>/resolve.txt   loest EINEN Akteurzug zu einem Delta auf
+    game_prompts/<name>/narrate.txt   erzaehlt, was der Spieler wahrnehmen konnte
 
 Keine dieser Dateien enthaelt eine Feldliste. Die kommt zur Laufzeit aus
 schema.describe() - wer sie in die Datei schriebe, haette die Drift wieder
 eingebaut, gegen die der ganze Umbau geht.
+
+=== Die Runde (agentische NPCs) ===
+
+Eine Runde besteht aus mehreren Akteurzuegen, nicht mehr aus einem: zuerst
+der Spieler, dann jeder aktive NPC in stabiler Reihenfolge (DECIDE -> aus
+seiner eigenen, gefilterten Wahrnehmung heraus; RESOLVE -> mit vollem
+Weltwissen), zuletzt EIN Erzaehl-Aufruf (NARRATE), der nur die Ereignisse
+sieht, die am Spielerknoten passiert sind. Der Resolver erzaehlt selbst
+nichts mehr - er liefert nur noch strukturierte events (Ort + Klausel), aus
+denen sich Erinnerungen und Erzaehlmaterial deterministisch ergeben (siehe
+state.World.apply_turn/visible). Die ganze Runde laeuft auf einer Kopie der
+Welt (World.copy()) und wird erst nach erfolgreichem NARRATE committet -
+schlaegt etwas davor fehl, ist self.world exakt wie vorher.
 """
 
 from __future__ import annotations
@@ -37,15 +51,16 @@ from pathlib import Path
 
 import llm
 import schema
+import state
 from state import World
 
 HERE = Path(__file__).resolve().parent
 DEBUG_DIR = HERE / "debug"
 PROMPTS_DIR = HERE / "game_prompts"
 
-# Die drei Dateien, aus denen ein Spielsystem besteht. Fehlt eine, ist der
+# Die vier Dateien, aus denen ein Spielsystem besteht. Fehlt eine, ist der
 # Ordner keins - available_systems() zeigt ihn dann gar nicht erst an.
-PARTS = ("init.txt", "intent.txt", "resolve.txt")
+PARTS = ("init.txt", "decide.txt", "resolve.txt", "narrate.txt")
 
 # Die Szenengrenze liegt jetzt hier, nicht mehr im Modelloutput. Frueher
 # meldete das Modell game.scene_number und game.status, und der Client
@@ -93,7 +108,7 @@ class Beat:
 def available_systems() -> list[Path]:
     """Alle vollstaendigen Spielsysteme, alphabetisch.
 
-    Vollstaendig heisst: der Ordner enthaelt alle drei Dateien. Ein halb
+    Vollstaendig heisst: der Ordner enthaelt alle vier Dateien. Ein halb
     angelegtes System taucht gar nicht erst auf - besser, als es waehlbar
     zu machen und erst beim ersten Aufruf zu scheitern.
     """
@@ -105,10 +120,10 @@ def available_systems() -> list[Path]:
 
 
 def estimate_tokens(system_dir: Path) -> int | None:
-    """Ungefaehre Tokenzahl aller drei Dateien zusammen.
+    """Ungefaehre Tokenzahl aller vier Dateien zusammen.
 
     Die Summe, nicht das Maximum: sie ist zwar keine Kontextgroesse (die
-    drei Prompts laufen nie gleichzeitig), aber ein ehrliches Mass fuer den
+    vier Prompts laufen nie gleichzeitig), aber ein ehrliches Mass fuer den
     Umfang eines Spielsystems - und darum geht es in der Auswahlliste.
     """
     try:
@@ -143,13 +158,19 @@ class Game:
 
     # ------------------------------------------------------------ Aufrufe
 
-    def begin(self) -> Beat:
+    def begin(self, on_actor=None) -> Beat:
         """Die Welt erzeugen und Szene 1 zurueckgeben.
 
         Ein einziger Aufruf, der beides liefert. Frueher schickte das
         Programm dafuer einen erfundenen ersten Spielerzug ("Beginne.
         Erzeuge die erste Szene.") - eine Nachricht, die so tat, als haette
         jemand etwas eingegeben.
+
+        on_actor existiert NUR der Signatur wegen (siehe advance()) - hier
+        gibt es noch keine Runde und keine NPC-Zuege, ueber die main.py
+        etwas anzeigen koennte. Der Parameter bleibt ungenutzt, damit
+        main.py begin() und advance() einheitlich aufrufen kann, ohne
+        zwischen beiden unterscheiden zu muessen.
         """
         # init.txt traegt den Platzhalter $START_PROMPT$ (siehe dort, Abschnitt
         # LANGUAGE) - er muss vor dem Versand ersetzt sein, sonst liest das
@@ -181,7 +202,7 @@ class Game:
 
         self.world = World.from_init(init)
         self.world.scene_number = 1
-        self.world.recent.append(narration)
+        self.world.remember(narration)
 
         self._log_block("STATE after init", self.world.render())
 
@@ -195,60 +216,99 @@ class Game:
             completed=False,
         )
 
-    def advance(self, player_input: str) -> Beat:
-        """Einen Zug spielen.
+    def advance(self, player_input: str, on_actor=None) -> Beat:
+        """Eine Runde spielen: Spieler, dann jeder aktive NPC, dann Erzaehlung.
 
-        Der Zustand aendert sich AUSSCHLIESSLICH in Schritt 3 (apply). Wirft
-        einer der Modellaufrufe davor, ist die Welt garantiert unveraendert -
-        das ist strenger als die fruehere Zusage "der Chatverlauf bleibt
-        konsistent" und braucht kein Aufraeumen im Fehlerfall.
+        Laeuft komplett auf einer KOPIE der Welt (World.copy()) und
+        committet sie erst hier am Ende, NACH erfolgreichem NARRATE. Das ist
+        strenger als die fruehere Zusage "der Chatverlauf bleibt konsistent":
+        eine Runde besteht jetzt aus bis zu zehn Modellaufrufen, und ein
+        Abbruch mittendrin darf keine halb gezogene Welt hinterlassen, in
+        der zwei von drei NPCs schon gehandelt haben.
+
+        Fehlerisolierung nach Wichtigkeit (siehe SceneError-Faelle unten):
+        scheitert der Spieler-RESOLVE oder NARRATE, ist die ganze Runde
+        verworfen und der Spieler darf es nochmal versuchen. Scheitert
+        DECIDE oder RESOLVE fuer EINEN NPC, setzt NUR dieser NPC aus - bei
+        bis zu vier NPCs pro Runde macht Null-Toleranz das Spiel unspielbar,
+        und ein NPC, der einmal nicht handelt, ist im Ergebnis nicht von
+        einem NPC zu unterscheiden, der abwartet.
+
+        on_actor ist optional und wird - wenn uebergeben - mit einem
+        Klartext-Label aufgerufen, sobald ein NPC an der Reihe ist ("Vogel
+        is acting"). Passt auf main.py's ui.Status.update() als
+        on_actor=lambda label: status.update(label=label).
         """
-        world = self.world
-        if world is None:                      # pragma: no cover
+        if self.world is None:                      # pragma: no cover
             raise SceneError("begin() was never called.")
+        world = self.world.copy()
+        log: list[str] = []   # abgelehnte Operationen, fuers Debug-Log
 
+        # --- 1. Spieler-Resolve ---
         try:
-            intent_text = self._intent(world)
+            delta = self._resolve(
+                world, actor_id="player", actor_node=world.player_at,
+                action_block=self._resolve_block_player(player_input))
+        except Exception as e:
+            raise SceneError(str(e)) from e
+        log += world.apply_turn("player", delta)
+
+        # --- 2. NPC-Zuege, stabile INIT-Reihenfolge ---
+        for npc in world.active_npcs_in_order():
+            if npc.status != "active":
+                # Kann durch eine FRUEHERE Figur in DERSELBEN Runde
+                # deaktiviert worden sein (status_changes) - active_npcs_
+                # in_order() wurde vor der Schleife einmal ausgewertet, npc
+                # ist aber eine lebende Referenz in world.characters, ihr
+                # .status ist also aktuell.
+                continue
+
+            if on_actor:
+                on_actor(f"{npc.name} is acting")
+
+            try:
+                decision = self._decide(world, npc)
+            except Exception as e:
+                self._log_block(f"DECIDE {npc.id} failed - skipped", str(e))
+                continue
+
+            npc.aim = decision.aim
+
+            try:
+                delta = self._resolve(
+                    world, actor_id=npc.id, actor_node=npc.at,
+                    action_block=self._resolve_block_npc(npc, decision))
+            except Exception as e:
+                self._log_block(f"RESOLVE {npc.id} failed - skipped", str(e))
+                continue
+            log += world.apply_turn(npc.id, delta)
+
+        if log:
+            self._log_block("REJECTED", "\n".join(log))
+
+        # --- 3. Erzaehlen ---
+        try:
+            narrate = self._narrate(world, player_input)
         except Exception as e:
             raise SceneError(str(e)) from e
 
-        turn_cls = schema.turn_model(world.node_ids(), world.active_ids(),
-                                     world.exits_from(world.player_at))
-
-        system = self._system(self.prompts["resolve.txt"], turn_cls)
-        user = (f"WORLD STATE:\n{world.render()}\n\n"
-                + intent_text
-                + f"PLAYER ACTION:\n{player_input}")
-
-        self._log_block(f"TURN {world.scene_number + 1} / user", user)
-
-        try:
-            turn = self.engine.structured(
-                [{"role": "system", "content": system},
-                 {"role": "user", "content": user}],
-                turn_cls)
-        except Exception as e:
-            raise SceneError(str(e)) from e
-
-        self._log_thinking()
-        self._log_block("RESOLVE / result", turn.model_dump_json(indent=2))
-
-        rejected = world.apply(turn)
-        if rejected:
-            self._log_block("REJECTED", "\n".join(rejected))
-
+        world.scene_number += 1
         # Der Client entscheidet ueber das Ende, nicht das Modell. can_end
         # ist ein Vorschlag: er zaehlt erst ab MIN_SCENES, und die harte
         # Grenze bei MAX_SCENES gilt unabhaengig davon.
         completed = (world.scene_number >= MAX_SCENES
-                     or (turn.can_end and world.scene_number >= MIN_SCENES))
+                     or (narrate.can_end and world.scene_number >= MIN_SCENES))
+
+        narration, image_prompt = schema.narration_text(narrate)
+        world.remember(narration)
+
+        self.world = world   # erst jetzt committen
 
         # Der gerenderte Zustand ist beim Debuggen wertvoller als alles
-        # andere: an ihm sieht man, was das Modell im NAECHSTEN Zug
+        # andere: an ihm sieht man, was das Modell in der NAECHSTEN Runde
         # tatsaechlich zu sehen bekommt.
         self._log_block("STATE", world.render())
 
-        narration, image_prompt = schema.scene_text(turn)
         return Beat(
             narration=narration,
             image_prompt=image_prompt,
@@ -262,50 +322,104 @@ class Game:
 
     # ------------------------------------------------------------ intern
 
-    def _intent(self, world: World) -> str:
-        """Eine anwesende Figur fuer sich entscheiden lassen.
+    def _resolve(self, world: World, actor_id: str, actor_node: str,
+                action_block: str):
+        """EINEN Akteurzug (Spieler oder ein NPC) zu einem Delta aufloesen.
 
-        Gewaehlt wird der erste aktive Charakter am Spielerknoten. Gibt es
-        keinen, entfaellt die Stufe ersatzlos - dann steht dort niemand, der
-        etwas wahrnehmen koennte.
-
-        DER SINN DER GANZEN STUFE: Diese Figur bekommt NICHT den Weltzustand,
-        sondern world.render_for(sie) - nur ihren eigenen Knoten, ihr eigenes
-        Ziel, ihr eigenes Gedaechtnis. Ihr Nichtwissen ist damit eine
-        Eigenschaft des Kontextfensters und keine Bitte im Prompt. Sie kann
-        nicht "vergessen", was sie nicht wissen soll, weil es nie da war.
-
-        Kein Thinking noetig: kleine Frage, drei Felder, kleine Antwort.
-
-        Rueckgabe ist bereits der fertige Textblock fuer den Resolver -
-        leer, wenn niemand da war. So bleibt advance() frei von Sonderfaellen.
+        resolve_cls wird bei JEDEM Aufruf frisch gebaut, nicht einmal pro
+        Runde: node_ids/active_ids/die Ausgaenge des Akteurs koennen sich
+        MITTEN in der Runde aendern (ein fruehrer NPC kann einen anderen per
+        status_changes deaktivieren - die Grammatik des naechsten Akteurs
+        darf diese Figur dann nicht mehr als CharId anbieten).
         """
-        companions = world.companions()
-        if not companions:
-            return ""
+        resolve_cls = schema.resolve_model(
+            world.node_ids(), world.active_ids(), world.exits_from(actor_node))
 
-        char = companions[0]
-        intent_cls = schema.intent_model(world.exits_from(char.at) or ("stay",))
+        system = self._system(self.prompts["resolve.txt"], resolve_cls)
+        user = f"WORLD STATE:\n{world.render()}\n\n{action_block}"
 
-        system = self._system(self.prompts["intent.txt"], intent_cls)
-        user = world.render_for(char)
+        self._log_block(f"RESOLVE {actor_id} / user", user)
 
-        self._log_block(f"INTENT / {char.id} context", user)
-
-        intent = self.engine.structured(
+        result = self.engine.structured(
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
-            intent_cls)
+            resolve_cls)
 
-        self._log_block("INTENT / result", intent.model_dump_json(indent=2))
+        self._log_thinking()
+        self._log_block(f"RESOLVE {actor_id} / result",
+                        result.model_dump_json(indent=2))
+        return result
 
-        # Als Klartext an den Resolver, nicht als JSON - aus demselben
-        # Grund, aus dem der Zustand als Klartext geht (siehe
-        # World.render()). Der Resolver soll das lesen, nicht spiegeln.
-        return (f"CHARACTER INTENT ({char.id} {char.name}):\n"
-                f"  wants to: {intent.intent}\n"
-                f"  says: {intent.utterance or '(nothing)'}\n"
-                f"  moving to: {intent.move_to}\n\n")
+    def _resolve_block_player(self, player_input: str) -> str:
+        return f"ACTING: the player\nPLAYER ACTION:\n{player_input}\n"
+
+    def _resolve_block_npc(self, npc, decision) -> str:
+        return (f"ACTING: {npc.id} {npc.name}\n"
+                f"THEIR INTENT: {decision.intent}\n"
+                f"THEY SAY: {decision.utterance or '(nothing)'}\n"
+                f"THEY MOVE TO: {decision.move_to}\n")
+
+    def _decide(self, world: World, npc):
+        """Eine Figur fuer sich entscheiden lassen, aus IHRER Wahrnehmung
+        allein.
+
+        DER SINN DER GANZEN STUFE: Diese Figur bekommt NICHT den
+        Weltzustand, sondern world.render_for(sie) - nur ihren eigenen
+        Knoten, ihren eigenen Antrieb, ihr eigenes Gedaechtnis. Ihr
+        Nichtwissen ist damit eine Eigenschaft des Kontextfensters und
+        keine Bitte im Prompt. Sie kann nicht "vergessen", was sie nicht
+        wissen soll, weil es nie da war.
+        """
+        decide_cls = schema.decide_model(world.exits_from(npc.at) or ("stay",))
+
+        system = self._system(self.prompts["decide.txt"], decide_cls)
+        user = world.render_for(npc)
+
+        self._log_block(f"DECIDE / {npc.id} context", user)
+
+        result = self.engine.structured(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}],
+            decide_cls)
+
+        self._log_thinking()
+        self._log_block(f"DECIDE / {npc.id} result",
+                        result.model_dump_json(indent=2))
+        return result
+
+    def _narrate(self, world: World, player_input: str):
+        """Aus den fuer den Spieler SICHTBAREN Ereignissen dieser Runde eine
+        Szene machen.
+
+        Sichtbar heisst: state.visible(world.round_log) - nur Eintraege, bei
+        denen der Ort des Events mit der Spielerposition ZUM ZEITPUNKT des
+        Events uebereinstimmt. Ist die Liste leer, bekommt NARRATE einen
+        ausdruecklichen Hinweis darauf, statt zu schweigen - sonst waere ein
+        leerer Abschnitt eine Einladung, sich etwas auszudenken.
+        """
+        narrate_cls = schema.narrate_model()
+        system = self._system(self.prompts["narrate.txt"], narrate_cls)
+
+        visible_events = state.visible(world.round_log)
+        lines = [f"YOUR PLACE:\n{world.render_player_place()}", ""]
+        if visible_events:
+            lines.append("WHAT HAPPENED HERE THIS ROUND:")
+            lines.extend(f"  {e.clause}" for e in visible_events)
+        else:
+            lines.append("NOTHING VISIBLE HAPPENED HERE THIS ROUND.")
+        lines.append(f"\nPLAYER ACTION:\n{player_input}")
+        user = "\n".join(lines)
+
+        self._log_block("NARRATE / user", user)
+
+        result = self.engine.structured(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}],
+            narrate_cls)
+
+        self._log_thinking()
+        self._log_block("NARRATE / result", result.model_dump_json(indent=2))
+        return result
 
     def _system(self, prompt: str, model_cls) -> str:
         """Spielsystem-Text plus die Feldbeschreibung aus dem Schema.

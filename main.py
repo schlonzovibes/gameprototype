@@ -303,12 +303,21 @@ def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame,
     try:
         while True:
             try:
-                with ui.Status("the language model is working"):
-                    beat = step(*argument)
+                with ui.Status("the language model is working") as status:
+                    # on_actor gibt an, was gerade laeuft: waehrend einer
+                    # Runde ruft story.Game.advance() das je NPC-Zug mit
+                    # einem Klartext-Label auf ("Vogel is acting"), damit
+                    # der Spinner nicht zwei Minuten unbeschriftet bleibt.
+                    # begin() nimmt on_actor nur der Signatur wegen entgegen
+                    # und ignoriert es - deshalb hier keine Fallunterscheidung
+                    # zwischen begin und advance noetig.
+                    beat = step(*argument,
+                               on_actor=lambda label: status.update(label=label))
             except story.SceneError as e:
                 # Zug gescheitert. Der Weltzustand ist dabei garantiert
-                # unveraendert - state.World.apply() laeuft erst NACH den
-                # Modellaufrufen. Der Spieler darf einfach nochmal.
+                # unveraendert - Game.advance() arbeitet auf einer Kopie und
+                # committet sie erst nach erfolgreichem NARRATE (siehe
+                # story.py). Der Spieler darf einfach nochmal.
                 ui.write("\n" + ui.wrap(str(e), TEXT_WIDTH, " " * MARGIN) + "\n\n")
                 turn = ask_turn(engine)
                 if turn is None:

@@ -20,8 +20,8 @@ tag (de, en, fr, ...) in the field that asks for it.
 
 Every text the player will read must be written in that language: place
 names, character names, the opening narration. Everything the player will
-NOT read stays English: anchors, goals, facts, image prompts. Those are
-working material for the machine, not part of the fiction.
+NOT read stays English: anchors, agenda, aim, facts, image prompts. Those
+are working material for the machine, not part of the fiction.
 
 --------------------------------------------------
 2. ORDER OF INVENTION
@@ -33,12 +33,13 @@ Build in this order and do not skip ahead:
   2. objects        what is physically present at each place
   3. facts          what is true of the whole world
   4. characters     who is here, and where do they stand
-  5. goals          what each of them wants
+  5. agenda and aim what each of them wants, and their first step toward it
 
-Goals come LAST, and they are derived from the graph - never the other way
-round. A goal that could be satisfied without moving through this particular
-world is not a goal, it is a mood. If you invent the goal first, you will
-bend the map to serve it, and the map will feel like scenery.
+Agenda and aim come LAST, and both are derived from the graph - never the
+other way round. An agenda that could be satisfied without moving through
+this particular world is not an agenda, it is a mood. If you invent it
+first, you will bend the map to serve it, and the map will feel like
+scenery.
 
 --------------------------------------------------
 3. THE GRAPH
@@ -107,22 +108,33 @@ Two to four. None of them is the player.
 Each stands at a node. Spread them out - if everyone waits at the starting
 node, the world has nothing to discover.
 
-GOALS
+AGENDA AND AIM
 
-One English sentence. Concrete enough that it can be reached, or refused.
+agenda: one English sentence. Concrete enough that it can be reached, or
+refused. Fixed for the whole game - this is the ONLY reason this character
+will ever act.
 
     good:  get the pump running before the lower level floods
     good:  find out who opened the sluice, and make them say it aloud
     bad:   survive
     bad:   be mysterious
 
-This sentence is the ONLY reason this character will ever act. Later, in
-play, they will see nothing but their own location and their own goal. Write
-it so that it still tells them what to do when they are alone in a dark room
-with it.
+Later, in play, this character will see nothing but their own location,
+their own agenda and their own aim. Write the agenda so that it still tells
+them what to do when they are alone in a dark room with it.
 
-Two characters whose goals cannot both succeed are worth more than four who
-agree.
+aim: one English sentence, the FIRST step toward the agenda - not a plan for
+the whole game, just what this character tries first. During play they will
+replace it themselves, every round, with whatever they now believe is the
+next step. What you write here is only their opening move.
+
+    good (agenda: get the pump running):  aim: find the missing crank handle
+    bad  (agenda: get the pump running):  aim: get the pump running
+
+Two characters whose agendas cannot both succeed are worth more than four
+who agree. No two characters may share the same agenda. At least one agenda
+must be pursuable without the player - a world that only moves when the
+player moves is not a world, it is a prop.
 
 --------------------------------------------------
 7. THE OPENING SCENE
