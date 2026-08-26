@@ -1,6 +1,27 @@
 services:
   gameprototype:
-    image: nvcr.io/nvidia/pytorch:26.07-py3
+    # Die Pakete stecken jetzt IM IMAGE statt in einem pip-Aufruf beim
+    # Containerstart. Frueher wurden sie bei jedem Start neu installiert -
+    # nach einem 'compose down' war die Schreibschicht weg, und wer sich in
+    # den ersten ~30 Sekunden einklinkte, fand z.B. 'docker' noch nicht vor.
+    #
+    # dockerfile_inline haelt alles in dieser einen Datei; ein separates
+    # Dockerfile waere sonst noetig. Gebaut wird beim ersten 'compose up',
+    # danach kommt das fertige Image aus dem Cache und der Container ist in
+    # Sekunden da. Neu bauen mit:  docker compose build
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM nvcr.io/nvidia/pytorch:26.07-py3
+        # --no-cache-dir: der pip-Cache wuerde das Image nur aufblaehen und
+        # laeuft hier ohnehin ins Leere (der Ordner ist zur Bauzeit nicht
+        # gemountet).
+        RUN pip install --no-cache-dir \
+              'diffusers>=0.36' transformers accelerate safetensors pillow \
+              docker 'pydantic>=2.7'
+    # Name fuer das gebaute Image - ohne diese Zeile vergibt compose einen
+    # generierten Namen.
+    image: aigame-gameprototype
     container_name: gameprototype
     stdin_open: true
     tty: true
@@ -36,6 +57,15 @@ services:
       # Version das Flag nicht -> hier auf "" setzen. Die Ursache steht dann
       # sofort in der Fehlermeldung des Spiels.
       AIGAME_VLLM_ARGS: "--enable-prefix-caching"
+      # Reasoning-Parser von vLLM, passend zum Modell setzen (qwen3,
+      # deepseek_r1, ...). Leer lassen, wenn ohne Thinking gefahren wird.
+      #
+      # Zwingend, sobald AIGAME_THINK=1 UND eine Grammatik aktiv ist: ohne
+      # den Parser greift die Grammatik ab dem ersten Token, das Modell
+      # muesste also sofort mit "{" beginnen - ein <think>-Block waere damit
+      # unmoeglich und der Denkprozess verschwaende ersatzlos. Mit dem
+      # Parser denkt es frei und wird erst nach </think> gezwungen.
+      AIGAME_REASONING_PARSER: "qwen3"
       AIGAME_THINK: "1"
       TERM: ${TERM:-xterm-256color}
       TERM_PROGRAM: ${TERM_PROGRAM:-}
@@ -43,12 +73,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     working_dir: /workspace/gameprototype
-    # Umbrueche NUR nach && / || setzen - YAML '>' haelt tiefer eingerueckte
-    # Zeilen literal, und bash verlangt die Operatoren am Zeilenende.
-    command: >
-      bash -c "pip install 'diffusers>=0.36' transformers accelerate safetensors pillow docker &&
-        sleep infinity
-        "
+    # Nur noch warten - die Pakete bringt das Image schon mit (siehe build:
+    # oben). Das Spiel selbst startet man per:
+    #   docker exec -it -e TERM=$TERM gameprototype python3 main.py
+    command: ["sleep", "infinity"]
     depends_on:
       - vllm          # nur gestartet, nicht 'healthy' - der Server wird erst vom Spiel beladen
     deploy:

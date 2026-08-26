@@ -1,205 +1,336 @@
-"""Eine laufende Geschichte: Konversation, Szenenstand, Debug-Log.
+"""Eine laufende Partie: Aufrufe an das Modell, Zustand, Debug-Log.
 
-=== Warum es dieses Modul gibt ===
+=== Was sich gegenueber frueher geaendert hat ===
 
-Ein Sprachmodell hat kein Gedaechtnis. Es bekommt bei JEDER Anfrage den
-kompletten bisherigen Gespraechsverlauf mitgeschickt und leitet daraus ab,
-was als Naechstes passiert. Dieser Verlauf ist der Zustand des Spiels -
-und dieses Modul verwaltet ihn.
+Frueher war DIESE Datei der Weltzustand: eine wachsende Liste von
+Chatnachrichten, aus der HISTORY_TURNS vorne abschnitt, sobald sie zu lang
+wurde. Die Welt vergass damit ihren eigenen Anfang.
 
-Es trennt den Spielzustand von der Terminal-Darstellung. main.py fragt nur
-noch advance() und bekommt eine Scene zurueck - oder eine Exception, wenn
-der Zug nicht zustande kam. Der Verlauf bleibt in beiden Faellen konsistent.
+Jetzt liegt der Zustand in state.World, und jeder Aufruf besteht aus GENAU
+ZWEI Nachrichten:
 
-=== Wie der Verlauf aussieht ===
+    system   Spielsystem-Prompt + Feldbeschreibung aus schema.describe()
+             - ueber den ganzen Lauf byteweise identisch
+    user     der gerenderte Zustand + die Spieleraktion
+             - der einzige Teil, der sich pro Zug aendert
 
-Eine Liste von Nachrichten, jede mit einer Rolle:
+Das hat zwei Folgen. Erstens vergisst nichts mehr: der volle Zustand geht
+jedes Mal frisch mit. Zweitens ist der System-Prompt vollstaendig
+prefix-cachebar - der Server prefillt ihn einmal und danach nie wieder.
 
-    [{"role": "system",    "content": "<game_prompt.txt + CONTRACT>"},
-     {"role": "user",      "content": "Beginne. Erzeuge die erste Szene."},
-     {"role": "assistant", "content": "<JSON der Szene 1>"},
-     {"role": "user",      "content": "Ich oeffne die Tuer."},
-     {"role": "assistant", "content": "<JSON der Szene 2>"},
-     ...]
+=== Ein Spielsystem ist ein ORDNER ===
 
-system    = die Spielregeln, steht genau einmal ganz vorne
-user      = was der Spieler eingibt
-assistant = was das Modell geantwortet hat
+    game_prompts/<name>/init.txt      Weltgenerator, laeuft genau einmal
+    game_prompts/<name>/intent.txt    eine Figur entscheidet fuer sich
+    game_prompts/<name>/resolve.txt   Aufloesung und Erzaehlung
 
-Wichtig: wir speichern das VOLLSTAENDIGE JSON der Antwort, nicht nur den
-Erzaehltext. Darin steckt state_update - die persistente Welt. Wuerden wir
-nur die Erzaehlung behalten, vergaesse das Spiel bei jedem Zug, was es
-ueber seine eigene Welt weiss.
+Keine dieser Dateien enthaelt eine Feldliste. Die kommt zur Laufzeit aus
+schema.describe() - wer sie in die Datei schriebe, haette die Drift wieder
+eingebaut, gegen die der ganze Umbau geht.
 """
 
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import llm
+import schema
+from state import World
 
-# __file__ ist der Pfad dieser Datei. .resolve() macht ihn absolut,
-# .parent nimmt den Ordner darum. Ergebnis: der Projektordner - egal, von
-# welchem Verzeichnis aus das Spiel gestartet wurde.
 HERE = Path(__file__).resolve().parent
-PROMPT_FILE = HERE / "game_prompt.txt"
 DEBUG_DIR = HERE / "debug"
+PROMPTS_DIR = HERE / "game_prompts"
 
-# Wie viele Zuege im Kontext bleiben. Der Verlauf waechst mit jeder Szene;
-# irgendwann sprengt er das Kontextfenster (NUM_CTX in llm.py). Deshalb
-# schneiden wir vorne ab - der system-Prompt bleibt aber immer erhalten.
-HISTORY_TURNS = 12
+# Die drei Dateien, aus denen ein Spielsystem besteht. Fehlt eine, ist der
+# Ordner keins - available_systems() zeigt ihn dann gar nicht erst an.
+PARTS = ("init.txt", "intent.txt", "resolve.txt")
 
-FIRST_TURN = "Beginne. Erzeuge die erste Szene."
+# Die Szenengrenze liegt jetzt hier, nicht mehr im Modelloutput. Frueher
+# meldete das Modell game.scene_number und game.status, und der Client
+# zaehlte "hilfsweise" selbst mit - er wusste die Zahl also die ganze Zeit
+# und fragte trotzdem.
+MAX_SCENES = 15
+
+# Vor dieser Szene wird can_end ignoriert. Ein Modell, das die Situation
+# gern aufloest, koennte sonst in Szene 3 abschliessen - technisch richtig,
+# als Spiel wertlos.
+MIN_SCENES = 8
+
+# Grobe Token-Schaetzung: Tokens ~ Woerter * 1.4. Die verbreitete Regel
+# "Zeichen / 4" liegt bei Prompt-Dateien dieser Machart um rund ein Drittel
+# daneben, weil Leerzeilen und Trennlinien viele Zeichen, aber kaum Tokens
+# erzeugen. Die Wortzahl ignoriert diesen Fuellstoff von selbst.
+TOKENS_PER_WORD = 1.4
 
 
 class SceneError(RuntimeError):
     """Der Zug ist gescheitert - der Spieler darf ihn wiederholen.
 
-    Eine eigene Exception-Klasse. Der Rumpf ist nur der Docstring, mehr
-    braucht es nicht: sie erbt alles von RuntimeError. Der Sinn ist die
-    Unterscheidbarkeit - main.py kann gezielt "except story.SceneError"
-    schreiben und faengt damit nur Spielfehler, keine Programmierfehler.
+    Eine eigene Klasse, damit main.py gezielt nur Spielfehler faengt und
+    Programmierfehler weiterhin mit Traceback durchschlagen.
     """
 
 
-def system_prompt(start_prompt: str) -> str:
-    """game_prompt.txt laden, den Start-Prompt einsetzen, Contract anhaengen.
+@dataclass(frozen=True)
+class Beat:
+    """Was main.py von einem Zug braucht - und sonst nichts.
 
-    In der Datei steht der Platzhalter $START_PROMPT$. Genau dort landet,
-    was der Spieler eingegeben hat.
+    Ersetzt die frueherer llm.Scene. Der Unterschied ist nicht die Form,
+    sondern die Herkunft: number und completed rechnet jetzt der Client,
+    statt sie beim Modell zu erfragen.
     """
-    if not PROMPT_FILE.exists():
-        raise SystemExit(f"{PROMPT_FILE.name} is missing.")
+    narration: str
+    image_prompt: str
+    number: int
+    max_scenes: int
+    completed: bool
 
-    text = PROMPT_FILE.read_text(encoding="utf-8")
 
-    # Ohne den Platzhalter wuerde das Spiel ohne Startsituation laufen und
-    # voellig beliebig erzaehlen. Lieber sofort und deutlich abbrechen.
-    if "$START_PROMPT$" not in text:
-        raise SystemExit("$START_PROMPT$ missing in game_prompt.txt.")
+# --------------------------------------------------------- Spielsysteme
 
-    return text.replace("$START_PROMPT$", start_prompt).strip() + "\n\n" + llm.CONTRACT
+def available_systems() -> list[Path]:
+    """Alle vollstaendigen Spielsysteme, alphabetisch.
+
+    Vollstaendig heisst: der Ordner enthaelt alle drei Dateien. Ein halb
+    angelegtes System taucht gar nicht erst auf - besser, als es waehlbar
+    zu machen und erst beim ersten Aufruf zu scheitern.
+    """
+    try:
+        return sorted(d for d in PROMPTS_DIR.iterdir()
+                      if d.is_dir() and all((d / p).is_file() for p in PARTS))
+    except OSError:
+        return []
+
+
+def estimate_tokens(system_dir: Path) -> int | None:
+    """Ungefaehre Tokenzahl aller drei Dateien zusammen.
+
+    Die Summe, nicht das Maximum: sie ist zwar keine Kontextgroesse (die
+    drei Prompts laufen nie gleichzeitig), aber ein ehrliches Mass fuer den
+    Umfang eines Spielsystems - und darum geht es in der Auswahlliste.
+    """
+    try:
+        words = sum(len((system_dir / part).read_text(encoding="utf-8").split())
+                    for part in PARTS)
+    except OSError:
+        return None
+    return round(words * TOKENS_PER_WORD)
+
+
+# ---------------------------------------------------------------- Partie
+
+class Game:
+    """Eine Partie von der Welterzeugung bis zur letzten Szene."""
+
+    def __init__(self, engine: llm.LLM, start_prompt: str, system_dir: Path):
+        self.engine = engine
+        self.start_prompt = start_prompt
+
+        try:
+            self.prompts = {part: (system_dir / part).read_text(encoding="utf-8")
+                            for part in PARTS}
+        except OSError as e:
+            raise SystemExit(f"Cannot read game system {system_dir.name}: {e}")
+
+        # Die Welt entsteht erst in begin(). Bis dahin gibt es sie nicht -
+        # und das soll man auch sehen koennen.
+        self.world: World | None = None
+
+        DEBUG_DIR.mkdir(exist_ok=True)
+        self.log = _log_path(start_prompt).open("w", encoding="utf-8")
+
+    # ------------------------------------------------------------ Aufrufe
+
+    def begin(self) -> Beat:
+        """Die Welt erzeugen und Szene 1 zurueckgeben.
+
+        Ein einziger Aufruf, der beides liefert. Frueher schickte das
+        Programm dafuer einen erfundenen ersten Spielerzug ("Beginne.
+        Erzeuge die erste Szene.") - eine Nachricht, die so tat, als haette
+        jemand etwas eingegeben.
+        """
+        system = self._system(self.prompts["init.txt"], schema.InitWorld)
+        user = f"START PROMPT:\n{self.start_prompt}"
+
+        self._log_block("INIT / system", system)
+        self._log_block("INIT / user", user)
+
+        try:
+            init = self.engine.structured(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user}],
+                schema.InitWorld)
+        except Exception as e:
+            raise SceneError(str(e)) from e
+
+        self._log_thinking()
+        self._log_block("INIT / result", init.model_dump_json(indent=2))
+
+        narration, image_prompt = schema.opening_text(init)
+
+        self.world = World.from_init(init)
+        self.world.scene_number = 1
+        self.world.recent.append(narration)
+
+        self._log_block("STATE after init", self.world.render())
+
+        return Beat(
+            narration=narration,
+            image_prompt=image_prompt,
+            number=1,
+            max_scenes=MAX_SCENES,
+            # Szene 1 kann nicht die letzte sein - sie hat noch keine
+            # Spieleraktion gesehen.
+            completed=False,
+        )
+
+    def advance(self, player_input: str) -> Beat:
+        """Einen Zug spielen.
+
+        Der Zustand aendert sich AUSSCHLIESSLICH in Schritt 3 (apply). Wirft
+        einer der Modellaufrufe davor, ist die Welt garantiert unveraendert -
+        das ist strenger als die fruehere Zusage "der Chatverlauf bleibt
+        konsistent" und braucht kein Aufraeumen im Fehlerfall.
+        """
+        world = self.world
+        if world is None:                      # pragma: no cover
+            raise SceneError("begin() was never called.")
+
+        try:
+            intent_text = self._intent(world)
+        except Exception as e:
+            raise SceneError(str(e)) from e
+
+        turn_cls = schema.turn_model(world.node_ids(), world.active_ids())
+
+        system = self._system(self.prompts["resolve.txt"], turn_cls)
+        user = (f"WORLD STATE:\n{world.render()}\n\n"
+                + intent_text
+                + f"PLAYER ACTION:\n{player_input}")
+
+        self._log_block(f"TURN {world.scene_number + 1} / user", user)
+
+        try:
+            turn = self.engine.structured(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user}],
+                turn_cls)
+        except Exception as e:
+            raise SceneError(str(e)) from e
+
+        self._log_thinking()
+        self._log_block("RESOLVE / result", turn.model_dump_json(indent=2))
+
+        rejected = world.apply(turn)
+        if rejected:
+            self._log_block("REJECTED", "\n".join(rejected))
+
+        # Der Client entscheidet ueber das Ende, nicht das Modell. can_end
+        # ist ein Vorschlag: er zaehlt erst ab MIN_SCENES, und die harte
+        # Grenze bei MAX_SCENES gilt unabhaengig davon.
+        completed = (world.scene_number >= MAX_SCENES
+                     or (turn.can_end and world.scene_number >= MIN_SCENES))
+
+        # Der gerenderte Zustand ist beim Debuggen wertvoller als alles
+        # andere: an ihm sieht man, was das Modell im NAECHSTEN Zug
+        # tatsaechlich zu sehen bekommt.
+        self._log_block("STATE", world.render())
+
+        narration, image_prompt = schema.scene_text(turn)
+        return Beat(
+            narration=narration,
+            image_prompt=image_prompt,
+            number=world.scene_number,
+            max_scenes=MAX_SCENES,
+            completed=completed,
+        )
+
+    def close(self) -> None:
+        self.log.close()
+
+    # ------------------------------------------------------------ intern
+
+    def _intent(self, world: World) -> str:
+        """Eine anwesende Figur fuer sich entscheiden lassen.
+
+        Gewaehlt wird der erste aktive Charakter am Spielerknoten. Gibt es
+        keinen, entfaellt die Stufe ersatzlos - dann steht dort niemand, der
+        etwas wahrnehmen koennte.
+
+        DER SINN DER GANZEN STUFE: Diese Figur bekommt NICHT den Weltzustand,
+        sondern world.render_for(sie) - nur ihren eigenen Knoten, ihr eigenes
+        Ziel, ihr eigenes Gedaechtnis. Ihr Nichtwissen ist damit eine
+        Eigenschaft des Kontextfensters und keine Bitte im Prompt. Sie kann
+        nicht "vergessen", was sie nicht wissen soll, weil es nie da war.
+
+        Kein Thinking noetig: kleine Frage, drei Felder, kleine Antwort.
+
+        Rueckgabe ist bereits der fertige Textblock fuer den Resolver -
+        leer, wenn niemand da war. So bleibt advance() frei von Sonderfaellen.
+        """
+        companions = world.companions()
+        if not companions:
+            return ""
+
+        char = companions[0]
+        intent_cls = schema.intent_model(world.exits_from(char.at) or ("stay",))
+
+        system = self._system(self.prompts["intent.txt"], intent_cls)
+        user = world.render_for(char)
+
+        self._log_block(f"INTENT / {char.id} context", user)
+
+        intent = self.engine.structured(
+            [{"role": "system", "content": system},
+             {"role": "user", "content": user}],
+            intent_cls)
+
+        self._log_block("INTENT / result", intent.model_dump_json(indent=2))
+
+        # Als Klartext an den Resolver, nicht als JSON - aus demselben
+        # Grund, aus dem der Zustand als Klartext geht (siehe
+        # World.render()). Der Resolver soll das lesen, nicht spiegeln.
+        return (f"CHARACTER INTENT ({char.id} {char.name}):\n"
+                f"  wants to: {intent.intent}\n"
+                f"  says: {intent.utterance or '(nothing)'}\n"
+                f"  moving to: {intent.move_to}\n\n")
+
+    def _system(self, prompt: str, model_cls) -> str:
+        """Spielsystem-Text plus die Feldbeschreibung aus dem Schema.
+
+        Die Grammatik erzwingt die Form, aber das Modell sieht sie nie - sie
+        wirkt beim Server. Die BEDEUTUNG der Felder muss deshalb hier in den
+        Prompt. Beides stammt aus derselben Klasse und kann nicht
+        auseinanderlaufen.
+        """
+        return (prompt.rstrip()
+                + "\n\n"
+                + "--------------------------------------------------\n"
+                + "OUTPUT FIELDS\n"
+                + "--------------------------------------------------\n\n"
+                + schema.describe(model_cls))
+
+    def _log_block(self, title: str, body: str) -> None:
+        self.log.write(f"===== {title} =====\n{body}\n\n")
+        # Sofort schreiben: bei einem Absturz ist gerade der letzte Block
+        # der interessante, und der stuende sonst noch im Puffer.
+        self.log.flush()
+
+    def _log_thinking(self) -> None:
+        if self.engine.last_thinking:
+            self._log_block("THINKING", self.engine.last_thinking.strip())
 
 
 def _log_path(start_prompt: str) -> Path:
     """Dateiname aus dem Start-Prompt: bereinigt, gekuerzt, kollisionsfrei."""
-    # re.sub(muster, ersatz, text) ersetzt alles, was passt.
-    # [^\w\s.-] heisst: alles, was NICHT (^) Buchstabe/Ziffer (\w),
-    # Leerraum (\s), Punkt oder Bindestrich ist. Also Schraegstriche,
-    # Doppelpunkte und aehnliches, die in Dateinamen Aerger machen.
     slug = re.sub(r"[^\w\s.-]", "", start_prompt, flags=re.UNICODE).strip()
-
-    # \s+ = eine oder mehrere Leerstellen -> ein Unterstrich.
-    # [:80] schneidet nach 80 Zeichen ab, strip("._-") raeumt Reste am Rand.
-    # "or 'untitled'" faengt den Fall ab, dass nichts uebrig bleibt.
     slug = re.sub(r"\s+", "_", slug)[:80].strip("._-") or "untitled"
 
-    # Gibt es die Datei schon, wird durchgezaehlt: name.txt, name-2.txt, ...
     path, n = DEBUG_DIR / f"{slug}.txt", 2
     while path.exists():
         path = DEBUG_DIR / f"{slug}-{n}.txt"
         n += 1
     return path
-
-
-class Story:
-    """Eine Geschichte von der ersten bis zur letzten Szene."""
-
-    def __init__(self, engine: llm.LLM, start_prompt: str):
-        self.engine = engine
-
-        # Der Verlauf beginnt mit genau einer system-Nachricht.
-        self.messages = [{"role": "system", "content": system_prompt(start_prompt)}]
-
-        self.number = 0                    # noch keine Szene gespielt
-        self.max_scenes = llm.MAX_SCENES
-
-        # exist_ok=True: kein Fehler, wenn der Ordner schon da ist.
-        DEBUG_DIR.mkdir(exist_ok=True)
-        # "w" = schreiben (vorhandene Datei wuerde geleert - kann hier nicht
-        # passieren, _log_path() sucht ja einen freien Namen).
-        self.log = _log_path(start_prompt).open("w", encoding="utf-8")
-
-    # @property laesst eine Methode wie ein Attribut aussehen: man schreibt
-    # tale.first_turn, nicht tale.first_turn(). Fuer einfache Abfragen ohne
-    # Argumente ist das die lesbarere Form.
-    @property
-    def first_turn(self) -> str:
-        return FIRST_TURN
-
-    def advance(self, player_input: str) -> llm.Scene:
-        """Einen Zug spielen. Bei Fehlschlag bleibt der Verlauf unveraendert.
-
-        Das ist die zentrale Zusage dieser Klasse: entweder es kommt eine
-        Scene zurueck UND der Verlauf ist gewachsen, oder es fliegt eine
-        SceneError UND der Verlauf ist exakt wie vorher. Nie etwas dazwischen.
-
-        Ohne diese Zusage wuerde eine gescheiterte Anfrage die Spielereingabe
-        im Verlauf zuruecklassen. Beim naechsten Versuch stuende sie doppelt
-        drin, und das Modell wuerde sich fragen, warum der Spieler alles
-        zweimal sagt.
-        """
-        self.messages.append({"role": "user", "content": player_input})
-
-        try:
-            # self.number + 1 ist die Rueckfall-Szenennummer, falls das
-            # Modell game.scene_number nicht mitschickt.
-            scene = self.engine.scene(self._context(), self.number + 1)
-        except Exception as e:
-            self.messages.pop()   # Eingabe wieder entfernen - Verlauf sauber
-            # Aus jedem Fehler wird eine SceneError, damit main.py nur eine
-            # Sorte fangen muss. "from e" behaelt die Originalursache.
-            raise SceneError(str(e)) from e
-
-        # Antwort kam an, war aber unbrauchbar - genauso behandeln.
-        if not scene.narration and not scene.visual:
-            self.messages.pop()
-            raise SceneError("Unusable response from the language model.")
-
-        # Vollstaendiges JSON in den Verlauf, nicht nur die Erzaehlung:
-        # die persistente Welt (state_update) lebt von diesen Nachrichten.
-        self.messages.append({"role": "assistant", "content": scene.raw})
-
-        self.number, self.max_scenes = scene.number, scene.max_scenes
-        self._write_log(scene)
-        return scene
-
-    def close(self) -> None:
-        """Log-Datei schliessen. main.py ruft das im finally auf."""
-        self.log.close()
-
-    def _context(self) -> list[dict]:
-        """Der Verlauf, zurechtgeschnitten aufs Kontextfenster.
-
-        Der system-Prompt (die Spielregeln) muss IMMER dabei sein, sonst
-        vergisst das Modell mitten im Spiel, was es eigentlich tut. Deshalb
-        wird der Kopf abgetrennt, nur der Rest gekuerzt und beides wieder
-        zusammengesetzt.
-        """
-        head, tail = self.messages[:1], self.messages[1:]
-        # Negative Indizes zaehlen von hinten: [-24:] sind die letzten 24
-        # Eintraege. Mal zwei, weil jeder Zug aus zwei Nachrichten besteht
-        # (Spielereingabe + Modellantwort).
-        return head + tail[-(HISTORY_TURNS * 2):]
-
-    def _write_log(self, scene: llm.Scene) -> None:
-        """Die Rohantwort ins Debug-Log schreiben.
-
-        Wenn eine Szene seltsam wird, steht hier, was das Modell wirklich
-        geliefert hat - inklusive seines Denkprozesses.
-        """
-        # "=" * 20 ergibt eine Reihe von zwanzig Gleichheitszeichen.
-        self.log.write(f"{'=' * 20} scene {scene.number} {'=' * 20}\n\n")
-
-        if self.engine.last_thinking:
-            self.log.write("[THINKING]\n" + self.engine.last_thinking.strip() + "\n\n")
-
-        self.log.write("[OUTPUT]\n" + scene.raw.strip() + "\n\n" + "-" * 60 + "\n\n")
-
-        # flush() schreibt sofort auf die Platte. Ohne das sammelt Python
-        # den Text und bei einem Absturz waere genau die interessante letzte
-        # Szene weg - also die, die den Absturz verursacht hat.
-        self.log.flush()
-

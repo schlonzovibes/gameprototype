@@ -49,6 +49,12 @@ VLLM_URL = os.environ.get("VLLM_URL", "http://127.0.0.1:8000")
 
 SEP = " · "   # Trenner zwischen Modellname und Groesse in der Auswahlliste
 
+# Woran man Modellgewichte auf der Platte erkennt. *.safetensors ist heute
+# der Standard; *.bin ist das aeltere PyTorch-Format, das manche Repos noch
+# mitbringen. Ohne den zweiten Eintrag waere ein reines .bin-Repo unsichtbar,
+# weil _weights() dann 0 zurueckgaebe und vllm_models() es aussortiert.
+_WEIGHT_FILES = ("*.safetensors", "*.bin")
+
 
 # @dataclass ist ein "Decorator" - er schreibt Code fuer uns. Aus den drei
 # Zeilen darunter erzeugt Python automatisch __init__, __repr__ und __eq__.
@@ -97,12 +103,21 @@ def cache_root() -> Path | None:
 
 
 def _snapshots() -> Iterator[tuple[str, Path]]:
-    """Liefert (repo_id, neuester_snapshot) fuer jedes Repo im Cache.
+    """Liefert (repo_id, snapshot) fuer jedes Repo im Cache - den neuesten
+    BRAUCHBAREN.
 
     Diese Funktion ist ein Generator: sie benutzt "yield" statt "return".
     Statt eine fertige Liste zu bauen, gibt sie ein Ergebnis nach dem anderen
     heraus. Man benutzt sie wie eine Liste ("for a, b in _snapshots():"),
     aber sie haelt nie alles gleichzeitig im Speicher.
+
+    Entscheidend ist das Wort "brauchbar": ein Repo kann mehrere Snapshots
+    haben, und der neueste ist nicht zwingend der vollstaendige. Bricht ein
+    Download ab, bleibt oft ein leerer oder halber Snapshot-Ordner zurueck -
+    und genau der ist dann der neueste. Wuerde hier stur snaps[0] genommen,
+    verschwaende das ganze Modell aus der Auswahl, obwohl daneben ein
+    intakter Snapshot liegt. Deshalb wird weitergesucht, bis einer eine
+    config.json (Sprachmodell) oder model_index.json (Bildmodell) traegt.
     """
     root = cache_root()
     if root is None:
@@ -125,10 +140,12 @@ def _snapshots() -> Iterator[tuple[str, Path]]:
             # Ordner fehlt oder ist nicht lesbar - dieses Repo ueberspringen.
             continue
 
-        if snaps:
-            # "models--Qwen--Qwen3-32B" -> "Qwen/Qwen3-32B"
-            # Erst das Praefix weg, dann "--" durch "/" ersetzen.
-            yield repo.name.replace("models--", "").replace("--", "/"), snaps[0]
+        for snap in snaps:
+            if (snap / "config.json").is_file() or (snap / "model_index.json").is_file():
+                # "models--Qwen--Qwen3-32B" -> "Qwen/Qwen3-32B"
+                # Erst das Praefix weg, dann "--" durch "/" ersetzen.
+                yield repo.name.replace("models--", "").replace("--", "/"), snap
+                break   # der erste brauchbare gewinnt, aeltere ignorieren
 
 
 def _weights(snap: Path) -> int:
@@ -159,13 +176,22 @@ def _weights(snap: Path) -> int:
         if not all((snap / s).exists() for s in shards):
             return 0
 
-    try:
+    total = 0
+    for pattern in _WEIGHT_FILES:
         # rglob sucht rekursiv, also auch in Unterordnern. Bildmodelle legen
         # ihre Gewichte in transformer/, vae/ usw. ab - deshalb rglob und
         # nicht das flache glob.
-        return sum(p.stat().st_size for p in snap.rglob("*.safetensors"))
-    except OSError:
-        return 0
+        for path in snap.rglob(pattern):
+            try:
+                total += path.stat().st_size
+            except OSError:
+                # Kaputter Symlink oder Rechteproblem bei EINER Datei. Frueher
+                # stand hier ein sum() um alles herum - dann hat eine einzige
+                # unlesbare Datei die ganze Summe auf 0 gesetzt und das Modell
+                # aus der Auswahl geworfen. Die Vollstaendigkeit prueft ohnehin
+                # der Shard-Index oben, hier zaehlen wir nur, was messbar ist.
+                continue
+    return total
 
 
 # ------------------------------------------------------------------ Auswahl

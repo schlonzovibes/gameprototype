@@ -8,8 +8,10 @@ in die richtige Reihenfolge.
 === Wer macht was ===
 
     main.py        der Ablauf (diese Datei)
-    story.py       Spielzustand: Gespraechsverlauf, Szenenstand, Log
-    llm.py         Sprachmodelle: Ollama und vLLM, JSON auswerten
+    story.py       eine Partie: Modellaufrufe, Szenenstand, Log
+    state.py       der Weltzustand - Graph, Figuren, Spuren
+    schema.py      die einzige Quelle des Ausgabeformats
+    llm.py         Sprachmodelle: Ollama und vLLM
     models.py      welche Modelle gibt es ueberhaupt
     diffusion.py   Bildmodell laden und Bilder erzeugen
     termimage.py   Bild -> Text fuers Terminal
@@ -24,14 +26,18 @@ in die richtige Reihenfolge.
     2. Sprachmodell aus diesem Backend waehlen -> laden (Name erscheint
        sofort in der Kopfzeile)
     3. Bildmodell aus dem HF-Cache waehlen -> laden
-    4. Titelgrafik, Start-Prompt eingeben
-    5. Bild / Erzaehltext / Eingabe zwischen Kopf- und Fusszeile, Szenenstand
+    4. Spielsystem aus game_prompts/ waehlen - zuletzt, weil hier nichts
+       geladen wird und die Entscheidung so direkt vor dem Spiel faellt
+    5. Titelgrafik, Start-Prompt eingeben
+    6. Bild / Erzaehltext / Eingabe zwischen Kopf- und Fusszeile, Szenenstand
        wandert ab hier zusaetzlich in die Kopfzeile
 
-Ein Durchlauf endet, wenn das Modell game.status auf "completed" setzt
-(spaetestens Szene 15) oder bei "/restart". Beides fuehrt zurueck zum
-Titelbildschirm - die Modelle bleiben dafuer geladen, weil das Laden
-Minuten dauert und die Geschichte davon unabhaengig ist.
+Ein Durchlauf endet, wenn der CLIENT ihn beendet - nach Szene 15, oder
+frueher, wenn das Modell die Situation als abgeschlossen meldet UND genug
+Szenen gespielt sind (story.MAX_SCENES / MIN_SCENES). "/restart" tut
+dasselbe von Hand. Beides fuehrt zurueck zum Titelbildschirm; die Modelle
+bleiben geladen, weil das Laden Minuten dauert und die Geschichte davon
+unabhaengig ist.
 
 === Befehle an jeder Eingabezeile ===
 
@@ -76,10 +82,15 @@ UNLOAD_WORDS = {"unload", "/unload"}
 
 # ------------------------------------------------------------------ Setup
 
-def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
-    """Backend, Sprachmodell, Bildmodell - nur einmal pro Sitzung.
+def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion, Path]:
+    """Backend, Sprachmodell, Bildmodell, Spielprompt - einmal pro Sitzung.
 
-    frame laeuft hier schon: die Fusszeile mit VRAM/GPU ist waehrend des
+    Das Spielsystem kommt bewusst zuletzt, nach dem Laden des Bildmodells:
+    die beiden Modelle brauchen zusammen viele Minuten, und in dieser Zeit
+    soll der Spieler nicht schon eine Entscheidung getroffen haben, die er
+    bis zum Spielstart wieder vergessen hat.
+
+    frame laeuft hier schon: die Fusszeile mit RAM/GPU ist waehrend des
     gesamten Ladens sichtbar, nicht erst ab der ersten Szene. Deshalb
     ui.clear_body() statt ui.clear() - das leert nur den Bereich zwischen
     Kopf- und Fusszeile und laesst beide unangetastet.
@@ -91,6 +102,13 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
     backend = ("ollama", "vllm")[ui.select(
         "Inference backend",
         [f"ollama   {models.OLLAMA_URL}", f"vllm     {models.VLLM_URL}"])]
+
+    # Sofort pruefen, ob dieses Backend ueberhaupt betriebsbereit ist. Ohne
+    # das faellt ein fehlendes docker-Paket erst auf, nachdem der Spieler
+    # schon ein Modell ausgesucht hat und das Laden anlaeuft - er hat dann
+    # eine Auswahl umsonst getroffen.
+    if backend == "vllm":
+        llm.VLLM.check_requirements()
 
     # indent=ui.INDENT: waehrend Backend/Modell-Auswahl steht auch der
     # Spinner buendig mit "RePlot" und "RAM", nicht am linken Rand wie der
@@ -131,7 +149,41 @@ def pick_models(frame: ui.Frame) -> tuple[llm.LLM, diffusion.Diffusion]:
     with ui.Status(f"loading {picked.label.split(models.SEP)[0]}", indent=ui.INDENT):
         painter.load()
 
-    return engine, painter
+    # Zuletzt das Spielsystem. Nichts zu laden - deshalb kein Spinner.
+    ui.clear_body()
+    systems = story.available_systems()
+    if not systems:
+        sys.exit(f"No game systems in {story.PROMPTS_DIR}. Each one is a "
+                 f"folder containing {', '.join(story.PARTS)}.")
+
+    system_dir = systems[ui.select("Game system",
+                                   [_system_label(d) for d in systems])]
+
+    return engine, painter, system_dir
+
+
+def _system_label(path: Path) -> str:
+    """Anzeigetext eines Spielsystems: Ordnername und ungefaehre Tokenzahl.
+
+    Gleiches Muster wie bei den Modellen ("name · groesse"), damit alle vier
+    Auswahllisten gleich aussehen.
+
+    Tokens statt Kilobyte, weil nur die Tokenzahl etwas Brauchbares aussagt:
+    sie ist der Anteil am Kontextfenster (NUM_CTX), den dieser Prompt in
+    JEDER Runde belegt. Kilobyte sagen darueber wenig - eine Datei voller
+    Trennlinien ist gross, kostet aber kaum Kontext.
+
+    Die Tilde ist Absicht: der Wert ist geschaetzt, nicht gezaehlt.
+    """
+    tokens = story.estimate_tokens(path)
+    if tokens is None:
+        return path.name   # nicht lesbar - wenigstens der Name
+    return f"{path.name}{models.SEP}~{_compact(tokens)} tokens"
+
+
+def _compact(number: int) -> str:
+    """6464 -> "6.5k", 850 -> "850". Haelt die Auswahlliste schmal."""
+    return f"{number / 1000:.1f}k" if number >= 1000 else str(number)
 
 
 def _no_models(backend: str) -> str:
@@ -224,7 +276,8 @@ def paint(painter: diffusion.Diffusion, visual: str):
 
 # ------------------------------------------------------------------ Story
 
-def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame) -> bool:
+def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame,
+              system_dir: Path) -> bool:
     """Ein kompletter Durchlauf. Rueckgabe True: noch eine Geschichte starten.
 
     Der Rahmen existiert schon (er laeuft seit main() gestartet ist) und
@@ -236,28 +289,38 @@ def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame) ->
     ui.write(f"\n{ui.GRAY} REPLOT YOUR STORY:{ui.RESET}\n")
     start_prompt = prompt(engine)   # nicht ui.ask(): "unload" soll auch hier gehen
 
-    tale = story.Story(engine, start_prompt)
-    turn = tale.first_turn   # der erste "Zug" kommt vom Programm, nicht vom Spieler
+    tale = story.Game(engine, start_prompt, system_dir)
+
+    # Szene 1 kommt aus der Welterzeugung, nicht aus einem Spielerzug. Der
+    # frueher hier erfundene erste Zug ("Beginne. Erzeuge die erste Szene.")
+    # entfaellt damit - begin() liefert Welt und Eroeffnung in einem Aufruf.
+    #
+    # step/argument halten fest, WAS als Naechstes zu rufen ist. Ohne diesen
+    # Kniff braeuchte es einen Sonderfall vor der Schleife und denselben
+    # Fehlerbehandlungsblock zweimal.
+    step, argument = tale.begin, ()
 
     try:
         while True:
             try:
                 with ui.Status("the language model is working"):
-                    scene = tale.advance(turn)
+                    beat = step(*argument)
             except story.SceneError as e:
-                # Zug gescheitert. story.Story hat den Verlauf sauber
-                # gehalten, der Spieler darf einfach nochmal.
+                # Zug gescheitert. Der Weltzustand ist dabei garantiert
+                # unveraendert - state.World.apply() laeuft erst NACH den
+                # Modellaufrufen. Der Spieler darf einfach nochmal.
                 ui.write("\n" + ui.wrap(str(e), TEXT_WIDTH, " " * MARGIN) + "\n\n")
                 turn = ask_turn(engine)
                 if turn is None:
                     return True     # /restart
+                step, argument = tale.advance, (turn,)
                 continue            # zurueck an den Schleifenanfang
 
-            frame.update(scene.number, scene.max_scenes)
+            frame.update(beat.number, beat.max_scenes)
             # Von innen nach aussen gelesen: erst malen, dann anzeigen.
-            render(paint(painter, scene.visual), scene.narration)
+            render(paint(painter, beat.image_prompt), beat.narration)
 
-            if scene.completed:
+            if beat.completed:
                 ui.write(ui.wrap("The journey has ended.", TEXT_WIDTH,
                                  " " * MARGIN) + "\n\n")
                 # "== 0" macht aus dem Index ein True/False: 0 ist
@@ -267,6 +330,7 @@ def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame) ->
             turn = ask_turn(engine)
             if turn is None:
                 return True
+            step, argument = tale.advance, (turn,)
     finally:
         tale.close()
 
@@ -329,14 +393,30 @@ def main() -> None:
     ui.clear()
     frame = ui.Frame(TITLE).start()
 
+    # Fehlertext zwischenspeichern statt sofort ausgeben: solange der Rahmen
+    # laeuft, gehoeren ihm Kopf- und Fusszeile, und er wuerde die Meldung eine
+    # Sekunde spaeter wieder ueberschreiben. Ausgegeben wird deshalb erst
+    # NACH frame.stop(), unterhalb des try/finally.
+    error = None
+
     try:
-        engine, painter = pick_models(frame)
+        engine, painter, system_dir = pick_models(frame)
         # Die Schleife laeuft, solange run_story() True liefert. Der Rumpf
         # ist leer - die ganze Arbeit steckt in der Bedingung.
-        while run_story(engine, painter, frame):
-            pass   # Neustart: gleiche Modelle, neue Geschichte
+        while run_story(engine, painter, frame, system_dir):
+            pass   # Neustart: gleiche Modelle, gleicher Prompt, neue Geschichte
     except KeyboardInterrupt:
         pass       # Strg+C ist ein normaler Weg zu gehen, kein Fehler
+    except RuntimeError as e:
+        # Vorhergesehene Betriebsfehler: fehlendes docker-Paket, vLLM nicht
+        # erreichbar, Server beim Laden gestorben. Die tragen alle bereits
+        # eine erklaerende Meldung - ein roher Traceback macht sie nur
+        # unleserlich.
+        #
+        # BEWUSST nur RuntimeError: ein Programmierfehler (AttributeError,
+        # TypeError, ...) soll weiterhin mit vollem Traceback durchschlagen,
+        # sonst sucht man ihn spaeter im Dunkeln.
+        error = str(e)
     finally:
         # Hier wird BEWUSST nicht entladen. Das Sprachmodell freizugeben ist
         # eine ausdrueckliche Entscheidung des Spielers ("unload"), kein
@@ -353,6 +433,11 @@ def main() -> None:
         frame.stop()
         ui.show_cursor()
         ui.write("\n")
+
+    # Erst jetzt - der Rahmen ist gestoppt, die Meldung bleibt stehen.
+    # sys.exit(str) schreibt den Text nach stderr und endet mit Code 1.
+    if error:
+        sys.exit(ui.wrap(error, TEXT_WIDTH, " " * MARGIN))
 
 
 # Dieser Block laeuft nur, wenn die Datei direkt gestartet wird

@@ -1,26 +1,36 @@
-"""Sprachmodell-Backends und Szenen-Parsing.
+"""Sprachmodell-Backends: reden mit Ollama und vLLM.
 
-=== Die Aufgabenteilung mit game_prompt.txt ===
+=== Die Aufgabenteilung ===
 
-Der Ausgabe-Contract liegt bewusst NICHT in game_prompt.txt, sondern hier:
-die Datei traegt die WELT (wie die Geschichte funktioniert), der Code
-erzwingt die FORM (wie die Antwort aussehen muss). So kann man am Spiel
-schrauben, ohne den Client zu zerbrechen - und umgekehrt.
+    game_prompts/   tragen die WELT - wie die Geschichte funktioniert
+    schema.py       traegt die FORM - was eine gueltige Antwort ist
+    diese Datei     bringt beides zum Server und holt die Antwort ab
 
-Den Szenenzaehler besitzt der Prompt, nicht der Code. Er kommt in
-game.scene_number zurueck und speist nur die Kopfzeile. Der Code zaehlt
-lediglich als Rueckfallebene mit, falls das Modell das Feld vergisst.
+Ein Spielsystem laesst sich damit austauschen, ohne den Client zu
+zerbrechen - und umgekehrt.
+
+=== Warum hier kein Parser mehr steht ===
+
+Frueher gab es parse_scene(): eine Funktion, die aus freiem Modelltext mit
+Rueckfallketten und Notfallpfaden eine Szene zu retten versuchte. Sie war
+noetig, weil das Format nur ERBETEN war ("antworte in JSON"), nicht
+erzwungen - gueltiges JSON war garantiert, das richtige nicht.
+
+Jetzt geht das Schema als GRAMMATIK an den Server. Er uebersetzt es in einen
+Automaten und maskiert bei jedem Schritt die Tokens weg, die zu einer
+ungueltigen Antwort fuehren wuerden. Ein falsches Feld ist damit nicht
+unwahrscheinlich, sondern unmoeglich. Was bleibt, ist Validierung - und die
+macht Pydantic.
 
 === Was hier drin ist ===
 
     LLM         gemeinsame Basisklasse - definiert, was ein Backend koennen muss
     Ollama      spricht mit dem Ollama-Server auf dem Host
-    VLLM        spricht mit dem vLLM-Server im zweiten Container
-    Scene       das Ergebnis eines Zuges, aufgeraeumt
-    parse_scene wandelt die JSON-Antwort in eine Scene
+    VLLM        spricht mit dem vLLM-Server im zweiten Container, und haelt
+                ihn am Leben (starten, ueberwachen, entladen)
 
-Python-Konzepte hier: Vererbung, abstrakte Methoden, Dataclasses, reguläre
-Ausdruecke, Exception-Ketten (raise ... from) und HTTP-Fehlerbehandlung.
+Python-Konzepte hier: Vererbung, abstrakte Methoden, reguläre Ausdruecke,
+Exception-Ketten (raise ... from) und HTTP-Fehlerbehandlung.
 """
 
 from __future__ import annotations
@@ -32,7 +42,6 @@ import shlex             # Argumente sicher fuer eine Shell-Zeile quoten
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
 
 from models import OLLAMA_URL, VLLM_URL, Model
 
@@ -41,7 +50,7 @@ from models import OLLAMA_URL, VLLM_URL, Model
 # Anfang der Geschichte, oder der Aufruf scheitert ganz.
 #
 # Ueberschlag, warum 40960 und nicht die frueheren 24576:
-#     ~6500   game_prompt.txt + Start-Prompt (der System-Prompt)
+#     ~6500   Spielprompt + Start-Prompt (der System-Prompt)
 #   ~15600   12 Zuege im Verlauf (HISTORY_TURNS), Szenen-JSON ~1300 je Zug
 #    ~4096   Platz fuer die Antwort (MAX_TOKENS)
 #   -------
@@ -55,10 +64,10 @@ NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "40960"))
 # Wie viele Tokens die Antwort hoechstens lang sein darf.
 #
 # Im Thinking-Modus muessen hier ZWEI Dinge hineinpassen: erst der
-# Denkprozess, dann das vollstaendige Szenen-JSON mit state_update,
-# Charakteren, Objekten und Dialog. Mit den frueheren 2048 wurde das JSON
-# regelmaessig mittendrin abgeschnitten - parse_scene() landete dann auf
-# dem Notfallpfad und die Szene war unbrauchbar.
+# Denkprozess, dann das vollstaendige Zug-JSON. Mit den frueheren 2048 wurde
+# das JSON regelmaessig mittendrin abgeschnitten. Seit die Grammatik greift,
+# ist ein abgeschnittenes JSON kein stiller Formatfehler mehr, sondern ein
+# harter Validierungsfehler - auffaellig, aber immer noch ein Abbruch.
 #
 # Betrifft nur vLLM: der Ollama-Payload setzt kein num_predict, dort ist
 # die Antwortlaenge ohnehin nur durch NUM_CTX begrenzt.
@@ -85,16 +94,16 @@ VLLM_GPU_UTIL = os.environ.get("AIGAME_VLLM_GPU_UTIL", "0.78")
 
 # Zusaetzliche Flags fuer 'vllm serve', als eine Shell-Zeile.
 #
-# --enable-prefix-caching ist hier der eigentliche Gewinn. Der System-Prompt
-# (game_prompt.txt + Start-Prompt, ~6500 Tokens) ist in JEDER Runde exakt
-# derselbe und wurde bisher jedes Mal komplett neu durch den Prefill
-# geschickt. Mit Prefix-Caching behaelt vLLM dessen KV-Cache und rechnet nur
-# die neu hinzugekommenen Tokens.
+# --enable-prefix-caching ist hier der eigentliche Gewinn. Jeder Aufruf
+# besteht aus genau zwei Nachrichten: einem ueber den ganzen Lauf
+# IDENTISCHEN System-Prompt (Spielsystem + Feldbeschreibung aus
+# schema.describe) und dem Zustand des Zuges. Der erste Teil wurde bisher
+# jedes Mal komplett neu durch den Prefill geschickt.
 #
-# Das greift hier besonders gut: HISTORY_TURNS (12) liegt unter der
-# Szenengrenze (15), der Verlauf wird also die meiste Zeit gar nicht
-# gekuerzt - damit bleibt nicht nur der System-Prompt, sondern fast der
-# ganze Kontext ein stabiler, wiederverwendbarer Praefix.
+# Mit Prefix-Caching behaelt vLLM dessen KV-Cache und rechnet nur den
+# zweiten Teil. Die schema-getriebene Architektur macht das besonders
+# wirksam: da kein Chatverlauf mehr mitwaechst, ist der cachebare Anteil in
+# Szene 15 genauso gross wie in Szene 1.
 #
 # In neueren vLLM-Versionen ist das ohnehin Standard; das Flag doppelt zu
 # setzen schadet nicht. Sollte eine Version es NICHT kennen, weigert sich
@@ -103,7 +112,18 @@ VLLM_GPU_UTIL = os.environ.get("AIGAME_VLLM_GPU_UTIL", "0.78")
 # in der Meldung, statt erst nach dem Timeout aufzufallen.
 VLLM_EXTRA_ARGS = os.environ.get("AIGAME_VLLM_ARGS", "--enable-prefix-caching")
 
-MAX_SCENES = 15   # nur der Anzeige-Default, falls das Modell nichts meldet
+# Name des Reasoning-Parsers von vLLM, passend zum Modell (qwen3,
+# deepseek_r1, ...). Leer lassen, wenn ohne Thinking gefahren wird.
+#
+# WARUM DAS ZUSAMMEN MIT DER GRAMMATIK ZWINGEND IST: ohne diesen Parser
+# greift die Grammatik ab dem ALLERERSTEN Token. Das Modell muesste also
+# sofort mit "{" beginnen - ein <think>-Block waere damit unmoeglich, und
+# der Denkprozess verschwaende ersatzlos, obwohl AIGAME_THINK gesetzt ist.
+#
+# Mit dem Parser trennt vLLM den Denkblock ab, liefert ihn in
+# reasoning_content, und zwingt erst den Text NACH </think> in die
+# Grammatik. Das Modell darf frei denken und muss danach exakt antworten.
+VLLM_REASONING_PARSER = os.environ.get("AIGAME_REASONING_PARSER", "")
 
 # Suchmuster fuer pgrep/pkill, um den 'vllm serve'-Prozess zu finden.
 #
@@ -137,45 +157,11 @@ _SELF_SAFE = "'vllm[ ]serve'"
 # Spielcontainer kann nicht versehentlich mitgetroffen werden.
 _VLLM_ANY = "-i 'vll[m]'"
 
-# Dieser Text wird an game_prompt.txt angehaengt (siehe story.system_prompt).
-# Die dreifachen Anfuehrungszeichen erlauben mehrzeilige Strings.
-# .strip() am Ende entfernt den Zeilenumbruch nach dem ersten """.
-CONTRACT = """
-AUSGABEFORMAT (verbindlich, keine Ausnahme):
-Antworte ausschliesslich mit dem einzelnen JSON-Objekt aus dem Abschnitt
-"REQUIRED OUTPUT FORMAT" mit den fuenf Top-Level-Feldern "game",
-"state_update", "scene", "player_agency", "final_scene_output".
-Kein Vorwort, kein Nachwort, keine Code-Fences, keine Kommentare im JSON.
-
-Feldregeln fuer die vom Client weiterverarbeiteten Felder:
-- game.scene_number: die Nummer DIESER Szene, beginnend bei 1.
-- game.status: "active", oder "completed" sobald die Reise endet -
-  spaetestens in Szene 15.
-- final_scene_output.visual_scene_description: englische Bildbeschreibung,
-  20-45 Woerter, nur Bildinhalt: Ort, Licht, Perspektive, Materialien,
-  Atmosphaere. Keine Handlung, keine Sprache, kein Text im Bild.
-- final_scene_output.narrator_text: deutscher Erzaehltext, 60-120 Woerter,
-  zweite Person.
-- scene.visual_prompt: englisch, direkt fuer ein Bildmodell nutzbar,
-  konsistent mit der Bildbeschreibung und den persistenten Charakteren.
-""".strip()
-
 # Ein vorkompiliertes Suchmuster. Findet <think>...</think> samt Inhalt.
 #   (.*?)      merkt sich, was dazwischen steht ("Gruppe 1")
 #   re.DOTALL  laesst den Punkt auch Zeilenumbrueche treffen
 # Einmal kompiliert statt bei jedem Aufruf neu - das ist schneller.
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
-
-
-@dataclass(frozen=True)
-class Scene:
-    """Das Ergebnis eines Zuges - aufgeraeumt und fertig zur Anzeige."""
-    narration: str    # deutscher Erzaehltext fuer den Bildschirm
-    visual: str       # englische Bildbeschreibung fuer das Bildmodell
-    raw: str          # das kanonische JSON, geht zurueck in den Chatverlauf
-    number: int       # welche Szene ist das (1-15)
-    max_scenes: int   # wie viele es insgesamt gibt
-    completed: bool   # ist die Geschichte hier zu Ende?
 
 
 class LLM:
@@ -185,15 +171,12 @@ class LLM:
     uebernehmen dabei alles, was hier steht. Sie muessen nur complete()
     selbst ausfuellen - der Rest gilt fuer beide gleichermassen.
 
-    Der Sinn: main.py und story.py muessen nicht wissen, welches Backend
-    laeuft. Sie rufen .scene() auf, und das funktioniert immer.
+    Der Sinn: story.py muss nicht wissen, welches Backend laeuft. Es ruft
+    .structured() auf und bekommt ein validiertes Objekt - egal ob dahinter
+    Ollama oder vLLM steckt.
     """
 
     last_thinking: str = ""   # Reasoning-Text des letzten complete()-Aufrufs
-
-    def scene(self, messages: list[dict], fallback_number: int) -> Scene:
-        """Einen Zug spielen: fragen und die Antwort auswerten."""
-        return parse_scene(self.complete(messages), fallback_number)
 
     def load(self, progress=None) -> None:  # pragma: no cover
         """Modell bereitstellen.
@@ -205,13 +188,65 @@ class LLM:
         """
         raise NotImplementedError
 
-    def complete(self, messages: list[dict]) -> str:  # pragma: no cover
+    def complete(self, messages: list[dict],
+                 schema: dict | None = None) -> str:  # pragma: no cover
         """Muss jede Unterklasse selbst implementieren.
+
+        schema ist ein JSON-Schema. Ist es gesetzt, wird die Antwort nicht
+        erbeten, sondern ERZWUNGEN: der Server baut daraus einen Automaten
+        und maskiert bei jedem Generierungsschritt die Tokens weg, die zu
+        einer ungueltigen Antwort fuehren wuerden.
+
+        Wichtig fuer das Verstaendnis: das Schema geht als eigener
+        Request-Parameter mit, NICHT im Prompt. Es kostet also keine Tokens
+        und stoert den Prefix-Cache nicht - der System-Prompt bleibt
+        byteweise identisch, egal welches Schema gerade gilt.
 
         NotImplementedError ist das uebliche Signal fuer "hier fehlt noch
         etwas" - wer von LLM erbt und das vergisst, merkt es sofort.
         """
         raise NotImplementedError
+
+    def structured(self, messages: list[dict], model_cls, retries: int = 1):
+        """Fragen und ein VALIDIERTES Pydantic-Objekt zurueckbekommen.
+
+        Der einzige Weg, auf dem story.py mit einem Modell spricht. Was hier
+        herauskommt, hat Grammatik und Validierung passiert - der Aufrufer
+        muss nichts mehr pruefen und nichts mehr retten.
+
+        Warum trotz Grammatik noch ein Reparaturversuch? Weil nicht jedes
+        Backend sie beherrscht: ein aelteres Ollama ignoriert das Schema und
+        liefert freies JSON. Bei vLLM greift dieser Zweig nie - er ist die
+        Rueckfallebene fuer den Fall, dass die Zusage nicht eingehalten wird.
+
+        Der Reparaturversuch haengt die fehlerhafte Antwort UND den
+        Validierungsfehler an den Verlauf. Das Modell sieht damit genau,
+        woran es gescheitert ist - eine blosse Wiederholung derselben Frage
+        wuerde meist denselben Fehler erzeugen.
+        """
+        # Spaeter Import: schema.py zieht pydantic, und llm.py wird auch
+        # dort geladen, wo nur die Modellverwaltung gebraucht wird.
+        from pydantic import ValidationError
+
+        schema = model_cls.model_json_schema()
+        attempt = list(messages)
+
+        for remaining in range(retries, -1, -1):
+            raw = self.complete(attempt, schema)
+            try:
+                return model_cls.model_validate_json(_json_slice(raw))
+            except ValidationError as e:
+                if remaining == 0:
+                    raise RuntimeError(
+                        f"Model output did not match the schema after "
+                        f"{retries + 1} attempts:\n{e}") from None
+                attempt = attempt + [
+                    {"role": "assistant", "content": raw},
+                    {"role": "user",
+                     "content": "That response was rejected by the schema "
+                                f"validator:\n{e}\n\nAnswer again. Return "
+                                "only the corrected object."},
+                ]
 
     def unload(self) -> bool:
         """Modell wieder freigeben, falls das Backend das braucht.
@@ -292,7 +327,8 @@ class Ollama(LLM):
         except Exception:
             return False
 
-    def complete(self, messages: list[dict]) -> str:
+    def complete(self, messages: list[dict],
+                 schema: dict | None = None) -> str:
         """Den Verlauf schicken und die Antwort als Text zurueckbekommen."""
         # Ein dict ist Pythons Woerterbuch: Schluessel -> Wert. Das hier wird
         # gleich zu JSON und geht so an den Server.
@@ -300,7 +336,12 @@ class Ollama(LLM):
             "model": self.name,
             "messages": messages,
             "stream": False,             # alles auf einmal, nicht Stueck fuer Stueck
-            "format": "json",            # Ollama zwingt das Modell zu gueltigem JSON
+            # Frueher stand hier fest "json" - das erzwang GUELTIGES JSON,
+            # aber nicht das RICHTIGE. Ein Schema ist die staerkere Zusage:
+            # es legt die Felder selbst fest. Ohne Schema bleibt es beim
+            # blossen "json", damit ein Aufruf ohne Modellklasse weiterhin
+            # brauchbar antwortet.
+            "format": schema if schema else "json",
             "options": {"temperature": 0.9, "num_ctx": NUM_CTX},
             # temperature 0.9 = recht kreativ. Niedriger waere braver und
             # vorhersehbarer - fuer eine generative Geschichte ungeeignet.
@@ -430,14 +471,27 @@ class VLLM(LLM):
                 TimeoutError, ValueError):
             return []
 
+    @staticmethod
+    def check_requirements() -> None:
+        """Prueft, ob dieses Backend ueberhaupt betriebsbereit ist.
+
+        Nur das Python-Paket - der Container selbst wird NICHT geprueft.
+        Der laeuft womoeglich noch nicht, wenn compose ihn gerade erst
+        gestartet hat, und das Spiel wartet beim Laden ohnehin auf ihn.
+
+        Absichtlich statisch (@staticmethod): main.py ruft das VOR der
+        Modellauswahl auf, es existiert also noch gar kein VLLM-Objekt.
+
+        Warum ueberhaupt vorab? Das Paket wird bei jedem Containerstart per
+        pip nachinstalliert (siehe docker-compose.yml). Laeuft die
+        Installation noch oder ist sie fehlgeschlagen, faellt das sonst erst
+        auf, nachdem der Spieler ein Modell ausgesucht hat.
+        """
+        _require_docker_package()
+
     def _container(self):
         """Das Docker-Objekt des vLLM-Containers holen."""
-        try:
-            import docker
-        except ImportError:
-            raise RuntimeError(
-                "Python package 'docker' is missing - install it or start "
-                f"vLLM manually: vllm serve {self.name} --port 8000") from None
+        docker = _require_docker_package()
         try:
             return docker.from_env().containers.get(self.CONTAINER)
         except Exception as e:
@@ -566,7 +620,12 @@ class VLLM(LLM):
             "--port", VLLM_URL.rsplit(":", 1)[-1],
             "--gpu-memory-utilization", VLLM_GPU_UTIL,
             "--max-model-len", str(NUM_CTX),
-        ] + shlex.split(VLLM_EXTRA_ARGS))
+        ]
+            # Nur anhaengen, wenn gesetzt - ein leerer Wert waere ein
+            # ungueltiges Argument, kein "kein Parser".
+            + (["--reasoning-parser", VLLM_REASONING_PARSER]
+               if VLLM_REASONING_PARSER else [])
+            + shlex.split(VLLM_EXTRA_ARGS))
         try:
             # 2>&1 leitet auch die Fehlerausgabe in dieselbe Datei - genau
             # dort steht der Traceback, wenn vLLM beim Laden abbricht.
@@ -579,14 +638,26 @@ class VLLM(LLM):
 
     # ----------------------------------------------------------- Abfragen
 
-    def complete(self, messages: list[dict]) -> str:
+    def complete(self, messages: list[dict],
+                 schema: dict | None = None) -> str:
         payload = {
             "model": self.name,
             "messages": messages,
             "temperature": 0.9,
             "max_tokens": MAX_TOKENS,
-            "response_format": {"type": "json_object"},   # JSON erzwingen
         }
+        if schema:
+            # strict=True heisst: keine zusaetzlichen Felder, keine
+            # Abweichung. vLLM uebersetzt das Schema in eine Grammatik
+            # (xgrammar) und maskiert waehrend der Generierung alle Tokens
+            # weg, die daraus herausfuehren wuerden.
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "out", "schema": schema,
+                                "strict": True},
+            }
+        else:
+            payload["response_format"] = {"type": "json_object"}
         try:
             data = _json_post(VLLM_URL + "/v1/chat/completions", payload, timeout=600)
         except urllib.error.HTTPError as e:
@@ -660,6 +731,58 @@ def _vllm_progress(tail: str) -> tuple[float | None, str]:
     return None, "starting vLLM"
 
 
+def _require_docker_package():
+    """Das Python-Paket 'docker' importieren - oder verstaendlich scheitern.
+
+    An einer Stelle statt an zweien, damit die Vorabpruefung
+    (VLLM.check_requirements) und der spaetere echte Zugriff (_container)
+    garantiert denselben Text zeigen. Zwei getrennte Formulierungen desselben
+    Problems laufen sonst frueher oder spaeter auseinander.
+
+    Das Paket fehlt haeufiger, als man denkt: docker-compose.yml installiert
+    es bei JEDEM Containerstart per pip neu, weil es nicht im Image steckt.
+    Nach einem 'compose down' ist die Schreibschicht weg - startet man das
+    Spiel, waehrend pip noch laeuft, ist es schlicht noch nicht da.
+    """
+    try:
+        import docker
+    except ImportError:
+        raise RuntimeError(
+            "Python package 'docker' is missing - the vLLM backend needs it "
+            "to start the server in the neighbouring container.\n\n"
+            "Fix it inside this container with:  pip install docker\n\n"
+            "It is installed at every container start (see the 'command:' "
+            "entry in docker-compose.yml), so this usually means the "
+            "installation is still running or failed.") from None
+    return docker
+
+
+def _json_slice(raw: str) -> str:
+    """Aus einer Antwort das JSON-Objekt herausschneiden.
+
+    Guertel UND Hosentraeger: greift die Grammatik, ist hier nichts zu tun -
+    die Antwort ist dann bereits ein blankes JSON-Objekt. Ein Ollama-Backend
+    ohne Schema-Unterstuetzung liefert aber freies JSON, mitunter in
+    ```-Bloecken oder mit einem Satz davor. Ohne diesen Schnitt faellt es
+    dort hart aus, wo es sich noch retten liesse.
+
+    Zwei Schritte: Code-Fences abstreifen, dann von der ersten "{" bis zur
+    letzten "}" schneiden.
+    """
+    text = raw.strip()
+
+    if text.startswith("```"):
+        # strip("`") entfernt alle Backticks an beiden Enden; das Abtrennen
+        # der ersten Zeile wirft die Sprachangabe weg (meist "json").
+        text = text.strip("`").split("\n", 1)[-1]
+
+    start, end = text.find("{"), text.rfind("}")
+    # find() liefert -1, wenn nichts da ist. Dann geben wir den Text
+    # unveraendert zurueck und lassen die Validierung den Fehler melden -
+    # sie formuliert ihn besser, als wir es hier koennten.
+    return text[start:end + 1] if start != -1 and end > start else text
+
+
 def _json_post(url: str, payload: dict, timeout: int) -> dict:
     """JSON hinschicken, JSON zurueckbekommen. Von beiden Backends benutzt."""
     req = urllib.request.Request(
@@ -683,81 +806,3 @@ def build(model: Model) -> LLM:
         elif model.backend == "vllm": return VLLM(model)
     """
     return {"ollama": Ollama, "vllm": VLLM}[model.backend](model)
-
-
-def _int(value, default: int) -> int:
-    """In eine ganze Zahl wandeln - oder den Default nehmen.
-
-    Lokale Modelle liefern die Szenennummer mal als 7, mal als "7", mal gar
-    nicht. Das faengt alle drei Faelle ab.
-    """
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default   # None -> TypeError, "sieben" -> ValueError
-
-
-def parse_scene(raw: str, fallback_number: int) -> Scene:
-    """Die Modellantwort in eine Scene verwandeln.
-
-    Diese Funktion faellt nie hart aus - die Szene muss weitergehen. Lokale
-    Modelle halten sich nicht immer an das Format: mal steht das JSON in
-    ```-Bloecken, mal mit "Hier ist deine Szene:" davor, mal ist es kaputt.
-    Alles das wird hier abgefangen.
-
-    Szenennummer und Limit kommen aus dem Modell; meldet es nichts
-    Brauchbares, zaehlt der Client mit fallback_number selbst weiter.
-    """
-    text = raw.strip()
-
-    # Fall 1: Das Modell hat Code-Fences drumgelegt (```json ... ```).
-    if text.startswith("```"):
-        # strip("`") entfernt alle Backticks vorne und hinten.
-        # split("\n", 1)[-1] wirft die erste Zeile weg (meist "json").
-        text = text.strip("`").split("\n", 1)[-1]
-
-    # Fall 2: Prosa vor oder nach dem JSON. Wir schneiden von der ersten "{"
-    # bis zur letzten "}" - alles ausserhalb ist Geschwaetz.
-    # find() liefert -1, wenn nichts gefunden wurde.
-    start, end = text.find("{"), text.rfind("}")
-    obj = None
-    if start != -1 and end > start:
-        text = text[start:end + 1]   # +1, weil das Ende exklusiv ist
-        try:
-            obj = json.loads(text)
-        except json.JSONDecodeError:
-            obj = None   # kaputtes JSON - unten faellt es auf den Notfall
-
-    # Fall 3: Notfall. Gar kein brauchbares JSON - dann zeigen wir eben den
-    # Rohtext als Erzaehltext an. Besser als ein leerer Bildschirm.
-    if not isinstance(obj, dict):
-        return Scene(raw.strip(), "", raw.strip(), fallback_number, MAX_SCENES, False)
-
-    # Eine Funktion innerhalb einer Funktion. Sie sieht obj automatisch
-    # (das nennt sich Closure) und spart drei fast gleiche Zeilen.
-    def section(key: str) -> dict:
-        """Ein Unterobjekt holen - oder ein leeres dict, wenn es fehlt
-        oder etwas anderes als ein Objekt ist."""
-        value = obj.get(key)
-        return value if isinstance(value, dict) else {}
-
-    game, scene, final = section("game"), section("scene"), section("final_scene_output")
-
-    return Scene(
-        # Die "or"-Ketten sind Rueckfallebenen: nimm final_scene_output, sonst
-        # scene, sonst leer. Manche Modelle fuellen nur eins der beiden.
-        # str(...) stellt sicher, dass wirklich Text herauskommt, auch wenn
-        # das Modell dort eine Zahl oder eine Liste abgelegt hat.
-        narration=str(final.get("narrator_text")
-                      or scene.get("narrator_text") or "").strip(),
-        visual=str(final.get("visual_scene_description")
-                   or scene.get("visual_scene_description")
-                   or scene.get("visual_prompt") or "").strip(),
-        raw=text,
-        number=_int(game.get("scene_number"), fallback_number),
-        max_scenes=_int(game.get("max_scenes"), MAX_SCENES),
-        # DIES ist das Spielende-Signal aus game_prompt.txt Abschnitt 38.
-        # .lower() faengt "Completed" und "COMPLETED" mit ab.
-        completed=str(game.get("status", "")).lower() == "completed",
-    )
-

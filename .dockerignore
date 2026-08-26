@@ -1,0 +1,14 @@
+# Build-Kontext leer halten.
+#
+# Der Kontext ist der Ordner, den Docker beim Bauen an den Daemon schickt -
+# hier also ~/git/gameprototype. Darin liegt cache/ mit dem kompletten
+# HuggingFace-Modellcache, gut und gern ueber 100 GB. Ohne diese Datei
+# wuerde Docker das bei JEDEM Bauvorgang alles einlesen und uebertragen.
+#
+# Das inline-Dockerfile in docker-compose.yml kopiert nichts aus dem Kontext
+# (kein COPY, kein ADD) - es installiert nur pip-Pakete. Der Kontext darf
+# also komplett leer sein, und der Bauvorgang startet dadurch sofort.
+#
+# ACHTUNG: Kommt spaeter ein COPY ins Dockerfile, muss die betreffende Datei
+# hier mit "!name" wieder ausgenommen werden - sonst findet Docker sie nicht.
+*

@@ -1,13 +1,19 @@
 # Alles ignorieren ...
 *
 
+# ... aber in Unterordner trotzdem hineinsehen. Ohne diese Zeile steigt git
+# in einen von "*" erfassten Ordner gar nicht erst hinab, und die Regeln
+# darunter kaemen nie zum Zug - game_prompts/*.txt waere unsichtbar.
+!*/
+
 # ... ausser Python- und Text-Dateien (sowie dieser Datei)
 !.gitignore
 !*.py
 !*.txt
 
-# Docker-Compose-Konfiguration explizit tracken
+# Docker-Konfiguration explizit tracken (faellt sonst unter das "*" oben)
 !docker-compose.yml
+!.dockerignore
 
 # Debug-Logs nicht tracken (wuerden sonst als *.txt durchrutschen)
 debug/

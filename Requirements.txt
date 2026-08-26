@@ -6,6 +6,9 @@ accelerate
 safetensors
 pillow
 
-# Optional: nur noetig fuer GGUF-Modelle (llama.cpp).
-# Ollama braucht keine Python-Abhaengigkeit.
-# llama-cpp-python
+# Ausgabeschema: schema.py definiert damit das Ausgabeformat, das als
+# Grammatik an den Server geht und die Antwort validiert.
+pydantic>=2.7
+
+# vLLM-Container aus dem Spiel heraus starten (llm.VLLM._serve)
+docker
