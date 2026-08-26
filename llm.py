@@ -64,14 +64,23 @@ NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "40960"))
 # Wie viele Tokens die Antwort hoechstens lang sein darf.
 #
 # Im Thinking-Modus muessen hier ZWEI Dinge hineinpassen: erst der
-# Denkprozess, dann das vollstaendige Zug-JSON. Mit den frueheren 2048 wurde
-# das JSON regelmaessig mittendrin abgeschnitten. Seit die Grammatik greift,
-# ist ein abgeschnittenes JSON kein stiller Formatfehler mehr, sondern ein
-# harter Validierungsfehler - auffaellig, aber immer noch ein Abbruch.
+# Denkprozess, dann das vollstaendige Zug-JSON. Mit den frueheren 4096 riss
+# das bei qwen3-Thinking regelmaessig VOR dem JSON ab: der Denkprozess allein
+# fraass das gesamte Budget auf, bevor </think> ueberhaupt kam. Der content
+# aus vLLM war dann buchstaeblich leer - nicht kaputtes JSON, sondern gar
+# keins, weil fuer die eigentliche Antwort kein einziges Token mehr uebrig
+# war. Genau das gab die kryptische Meldung "vLLM returned an empty
+# response" (siehe complete() unten, das den finish_reason jetzt mit in den
+# Fehlertext packt, falls es doch wieder passiert).
 #
-# Betrifft nur vLLM: der Ollama-Payload setzt kein num_predict, dort ist
-# die Antwortlaenge ohnehin nur durch NUM_CTX begrenzt.
-MAX_TOKENS = int(os.environ.get("AIGAME_MAX_TOKENS", "4096"))
+# 16384 gibt dem Denkprozess ausreichend Luft. Das geht zu Lasten des
+# Kontexts (max-model-len = NUM_CTX = 40960), aber der bleibt trotzdem gross
+# genug fuer den System-Prompt und den bislang laengsten Verlauf.
+#
+# Betrifft nur vLLM: der Ollama-Payload setzt kein num_predict, dort ist die
+# Antwortlaenge ohnehin nur durch NUM_CTX begrenzt - deshalb lief genau
+# dasselbe Modell auf Ollama anstandslos und auf vLLM mit "empty response".
+MAX_TOKENS = int(os.environ.get("AIGAME_MAX_TOKENS", "16384"))
 
 # Reasoning-Modus: manche Modelle koennen vor der Antwort "nachdenken".
 # Das kostet Zeit, verbessert aber oft die Konsistenz. Der Denktext landet
@@ -666,12 +675,24 @@ class VLLM(LLM):
 
         # Hier ohne .get(): fehlt "choices", ist die Antwort so kaputt, dass
         # ein lauter Fehler ehrlicher ist als ein stiller Ersatzwert.
-        message = data["choices"][0]["message"]
+        choice = data["choices"][0]
+        message = choice["message"]
         self.last_thinking = message.get("reasoning_content") or ""
         content = self._split_thinking((message.get("content") or "").strip())
 
         if not content:
-            raise RuntimeError(f"vLLM returned an empty response from {self.name}.")
+            # finish_reason mit in die Meldung: "length" heisst, MAX_TOKENS
+            # wurde erreicht, bevor ueberhaupt etwas ausserhalb von
+            # reasoning_content stand (typischerweise, weil der Denkprozess
+            # allein das ganze Budget verbraucht hat - siehe MAX_TOKENS oben).
+            # Ohne diesen Hinweis sieht ein leeres "content" bei einem
+            # Denkprozess, der das Budget sprengt, genauso aus wie jeder
+            # andere Grund fuer eine leere Antwort - man rät dann im Dunkeln
+            # statt die Ursache am finish_reason abzulesen.
+            reason = choice.get("finish_reason", "unknown")
+            raise RuntimeError(
+                f"vLLM returned an empty response from {self.name} "
+                f"(finish_reason={reason}).")
         return content
 
 

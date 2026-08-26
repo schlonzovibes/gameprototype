@@ -44,8 +44,13 @@ services:
       AIGAME_NUM_CTX: 40960
       # Antwortlaenge. Im Thinking-Modus muessen Denkprozess UND das
       # vollstaendige Szenen-JSON hineinpassen - mit 2048 wurde das JSON
-      # abgeschnitten. Betrifft nur vLLM, nicht Ollama.
-      AIGAME_MAX_TOKENS: 4096
+      # abgeschnitten, mit 4096 riss bei qwen3-Thinking regelmaessig schon
+      # der Denkprozess allein das Budget auf, sodass fuer das JSON gar
+      # nichts mehr uebrig war (vLLM lieferte dann "no answer" - ein
+      # buchstaeblich leerer content, kein kaputtes JSON). 16384 gibt dem
+      # Denkprozess genug Luft, siehe MAX_TOKENS in llm.py fuer Details.
+      # Betrifft nur vLLM, nicht Ollama.
+      AIGAME_MAX_TOKENS: 16384
       # Anteil des gemeinsamen Speichers fuer vLLM (Gewichte + KV-Cache).
       # 0.78 von 128 GB sind rund 100 GB; der Rest bleibt fuers Bildmodell,
       # das danach geladen wird. Hochsetzen, wenn vLLM beim KV-Cache
