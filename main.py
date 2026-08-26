@@ -313,7 +313,20 @@ def run_story(engine: llm.LLM, painter: diffusion.Diffusion, frame: ui.Frame,
                 turn = ask_turn(engine)
                 if turn is None:
                     return True     # /restart
-                step, argument = tale.advance, (turn,)
+
+                # War es begin() selbst, das gescheitert ist, gibt es noch
+                # keine Welt (tale.world ist dann None) - advance() wuerde
+                # darauf sofort mit "begin() was never called." abbrechen,
+                # und die naechste Runde durch denselben Zweig liefe in
+                # eine Endlosschleife, aus der nur /restart herausfuehrt.
+                # Stattdessen: begin() erneut versuchen, mit dem gerade
+                # eingegebenen Text als (moeglicherweise korrigiertem)
+                # Startprompt.
+                if tale.world is None:
+                    tale.start_prompt = turn
+                    step, argument = tale.begin, ()
+                else:
+                    step, argument = tale.advance, (turn,)
                 continue            # zurueck an den Schleifenanfang
 
             frame.update(beat.number, beat.max_scenes)

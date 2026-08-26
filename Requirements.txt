@@ -1,6 +1,8 @@
 # Bildmodell
 torch
-diffusers>=0.30
+# >=0.36: diffusion.py laedt Flux2KleinPipeline (FLUX.2), die es erst ab
+# dieser Version gibt - siehe die gleiche Untergrenze in docker-compose.yml.
+diffusers>=0.36
 transformers
 accelerate
 safetensors

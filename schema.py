@@ -170,14 +170,22 @@ def intent_model(node_ids: tuple[str, ...]) -> type[BaseModel]:
     return Intent
 
 
-def turn_model(node_ids: tuple[str, ...],
-               char_ids: tuple[str, ...]) -> type[BaseModel]:
+def turn_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
+               player_exits: tuple[str, ...]) -> type[BaseModel]:
     """Das Zustandsdelta eines Zuges, gefolgt von der Szene.
 
     Alles Neue kommt ueber offene Listen herein (marks_added, facts_added,
     ...). Das Schema selbst waechst dabei NIE - es beschreibt immer nur die
     Form eines Deltas, nie den Umfang der Welt. Deshalb bleibt die Grammatik
     in Szene 15 genauso klein wie in Szene 2.
+
+    player_exits sind die Ausgaenge des Knotens, an dem der Spieler GERADE
+    steht - anders als bei Move.to (jede Figur steht woanders, ein
+    gemeinsames Literal waere dort nicht moeglich) kennen wir die Position
+    des Spielers beim Bauen der Grammatik bereits genau. player_move_to
+    bekommt deshalb sein eigenes, engeres Literal statt des allgemeinen
+    MoveTo: die Beschreibung sagte immer schon "nur ein Ausgang des
+    aktuellen Knotens", jetzt kann die Grammatik es auch nicht mehr anders.
     """
     # Literal[()] wirft einen TypeError - ein leeres Tupel ist keine
     # gueltige Aufzaehlung. Gibt es keine Charaktere (alle tot, oder eine
@@ -191,6 +199,7 @@ def turn_model(node_ids: tuple[str, ...],
     NodeId = Literal[node_ids]                  # type: ignore[valid-type]
     CharId = Literal[char_ids]                  # type: ignore[valid-type]
     MoveTo = Literal[node_ids + ("stay",)]      # type: ignore[valid-type]
+    PlayerMoveTo = Literal[player_exits + ("stay",)]  # type: ignore[valid-type]
     Status = Literal["active", "disabled", "dead"]
 
     class Move(BaseModel):
@@ -237,7 +246,7 @@ def turn_model(node_ids: tuple[str, ...],
     class Turn(BaseModel):
         model_config = STRICT
 
-        player_move_to: MoveTo = Field(
+        player_move_to: PlayerMoveTo = Field(
             description="where the player ends up, or stay. Only an exit of "
                         "their current node.")
         moves: list[Move] = Field(

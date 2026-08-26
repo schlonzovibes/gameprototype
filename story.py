@@ -31,7 +31,6 @@ eingebaut, gegen die der ganze Umbau geht.
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,7 +151,16 @@ class Game:
         Erzeuge die erste Szene.") - eine Nachricht, die so tat, als haette
         jemand etwas eingegeben.
         """
-        system = self._system(self.prompts["init.txt"], schema.InitWorld)
+        # init.txt traegt den Platzhalter $START_PROMPT$ (siehe dort, Abschnitt
+        # LANGUAGE) - er muss vor dem Versand ersetzt sein, sonst liest das
+        # Modell im System-Prompt woertlich "$START_PROMPT$" statt des Texts,
+        # dessen Sprache es bestimmen soll. Erst hier statt schon in
+        # __init__(): begin() liest self.start_prompt bei jedem Aufruf frisch,
+        # ein Neuversuch nach einem gescheiterten ersten begin() (main.py)
+        # kann den Startprompt also aendern, ohne dass die Ersetzung veraltet.
+        init_prompt = self.prompts["init.txt"].replace(
+            "$START_PROMPT$", self.start_prompt)
+        system = self._system(init_prompt, schema.InitWorld)
         user = f"START PROMPT:\n{self.start_prompt}"
 
         self._log_block("INIT / system", system)
@@ -204,7 +212,8 @@ class Game:
         except Exception as e:
             raise SceneError(str(e)) from e
 
-        turn_cls = schema.turn_model(world.node_ids(), world.active_ids())
+        turn_cls = schema.turn_model(world.node_ids(), world.active_ids(),
+                                     world.exits_from(world.player_at))
 
         system = self._system(self.prompts["resolve.txt"], turn_cls)
         user = (f"WORLD STATE:\n{world.render()}\n\n"

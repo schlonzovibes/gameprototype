@@ -491,10 +491,9 @@ class VLLM(LLM):
         Absichtlich statisch (@staticmethod): main.py ruft das VOR der
         Modellauswahl auf, es existiert also noch gar kein VLLM-Objekt.
 
-        Warum ueberhaupt vorab? Das Paket wird bei jedem Containerstart per
-        pip nachinstalliert (siehe docker-compose.yml). Laeuft die
-        Installation noch oder ist sie fehlgeschlagen, faellt das sonst erst
-        auf, nachdem der Spieler ein Modell ausgesucht hat.
+        Warum ueberhaupt vorab? Fehlt das Paket im Image (siehe
+        _require_docker_package), faellt das sonst erst auf, nachdem der
+        Spieler ein Modell ausgesucht hat.
         """
         _require_docker_package()
 
@@ -760,10 +759,11 @@ def _require_docker_package():
     garantiert denselben Text zeigen. Zwei getrennte Formulierungen desselben
     Problems laufen sonst frueher oder spaeter auseinander.
 
-    Das Paket fehlt haeufiger, als man denkt: docker-compose.yml installiert
-    es bei JEDEM Containerstart per pip neu, weil es nicht im Image steckt.
-    Nach einem 'compose down' ist die Schreibschicht weg - startet man das
-    Spiel, waehrend pip noch laeuft, ist es schlicht noch nicht da.
+    Das Paket steckt heute IM IMAGE (siehe build.dockerfile_inline in
+    docker-compose.yml) statt per pip bei jedem Containerstart nachinstalliert
+    zu werden - das war frueher so, ist es aber nicht mehr. Fehlt es
+    trotzdem, ist meist das Image veraltet: es wurde nach einer Aenderung an
+    dockerfile_inline nicht neu gebaut.
     """
     try:
         import docker
@@ -772,9 +772,10 @@ def _require_docker_package():
             "Python package 'docker' is missing - the vLLM backend needs it "
             "to start the server in the neighbouring container.\n\n"
             "Fix it inside this container with:  pip install docker\n\n"
-            "It is installed at every container start (see the 'command:' "
-            "entry in docker-compose.yml), so this usually means the "
-            "installation is still running or failed.") from None
+            "It is baked into the image at build time (see "
+            "build.dockerfile_inline in docker-compose.yml), so this usually "
+            "means the image is out of date - rebuild it with:  "
+            "docker compose build") from None
     return docker
 
 
