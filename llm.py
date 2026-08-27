@@ -43,9 +43,9 @@ from models import OLLAMA_URL, VLLM_URL, Model
 # Ueberschlag, warum 40960 und nicht die frueheren 24576:
 #     ~6500   game_prompt.txt + Start-Prompt (der System-Prompt)
 #   ~15600   12 Zuege im Verlauf (HISTORY_TURNS), Szenen-JSON ~1300 je Zug
-#    ~4096   Platz fuer die Antwort (MAX_TOKENS)
+#    ~8192   Platz fuer Denkprozess + Antwort (MAX_TOKENS)
 #   -------
-#   ~26200   und damit bereits mehr, als 24576 hergaben
+#   ~30300   und damit deutlich mehr, als 24576 hergaben
 #
 # Bei einem quantisierten Modell (NVFP4) sind die Gewichte klein und vom
 # VLLM_GPU_UTIL-Budget bleibt reichlich fuer den KV-Cache - mehr Kontext
@@ -55,14 +55,15 @@ NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "40960"))
 # Wie viele Tokens die Antwort hoechstens lang sein darf.
 #
 # Im Thinking-Modus muessen hier ZWEI Dinge hineinpassen: erst der
-# Denkprozess, dann das vollstaendige Szenen-JSON mit state_update,
-# Charakteren, Objekten und Dialog. Mit den frueheren 2048 wurde das JSON
-# regelmaessig mittendrin abgeschnitten - parse_scene() landete dann auf
-# dem Notfallpfad und die Szene war unbrauchbar.
+# Denkprozess (bei Qwen3 gern 1000-3000 Tokens), dann das vollstaendige
+# Szenen-JSON mit state_update, Charakteren, Objekten und Dialog (~1500).
+# Mit den frueheren 2048/4096 blieb fuer das JSON nach dem Denken zu wenig
+# uebrig - es wurde mittendrin abgeschnitten, parse_scene() landete auf dem
+# Notfallpfad und die Szene war unbrauchbar. 8192 gibt beidem Luft.
 #
 # Betrifft nur vLLM: der Ollama-Payload setzt kein num_predict, dort ist
 # die Antwortlaenge ohnehin nur durch NUM_CTX begrenzt.
-MAX_TOKENS = int(os.environ.get("AIGAME_MAX_TOKENS", "4096"))
+MAX_TOKENS = int(os.environ.get("AIGAME_MAX_TOKENS", "8192"))
 
 # Reasoning-Modus: manche Modelle koennen vor der Antwort "nachdenken".
 # Das kostet Zeit, verbessert aber oft die Konsistenz. Der Denktext landet
@@ -228,25 +229,44 @@ class LLM:
         return True
 
     def _split_thinking(self, content: str) -> str:
-        """<think>...</think> aus dem Content loesen.
+        """Den Denkprozess aus dem Content loesen.
 
         Denkmodelle schreiben ihren Denkprozess mitten in die Antwort. Das
         muss raus, sonst ist das JSON kaputt. Der Text wandert stattdessen
         nach self.last_thinking und von dort ins Debug-Log.
         """
+        # Fall 1: vollstaendiger Block <think>...</think>.
         match = _THINK_RE.search(content)
-        if not match:
-            return content     # nichts gefunden - unveraendert zurueck
+        if match:
+            block = match.group(1).strip()   # Gruppe 1 = das (.*?) im Muster
+            # An vorhandenen Denktext anhaengen (manche Backends liefern
+            # beides: ein eigenes Feld UND einen Inline-Block). strip() raeumt
+            # danach den fuehrenden Umbruch weg, falls last_thinking leer war.
+            self.last_thinking = f"{self.last_thinking}\n{block}".strip()
+            # sub() ersetzt das Gefundene durch "" - count=1 nur das erste Mal.
+            return _THINK_RE.sub("", content, count=1).strip()
 
-        block = match.group(1).strip()   # Gruppe 1 = das (.*?) im Muster
+        # Fall 2: nur ein schliessendes </think>, kein oeffnendes. Qwen3 & Co.
+        # bekommen das oeffnende <think> schon aus der Chat-Vorlage in den
+        # Prompt gelegt - im generierten Text steht dann alles VOR dem ersten
+        # </think> als Denkprozess, ohne Tag davor. Mit --reasoning-parser
+        # wuerde vLLM das sauber in reasoning_content abtrennen; dieser Build
+        # hat keinen, also machen wir es hier. Ohne diesen Zweig zieht
+        # parse_scene() die erste "{" aus dem Denktext und das JSON ist hin.
+        head, sep, rest = content.partition("</think>")
+        if sep:
+            self.last_thinking = f"{self.last_thinking}\n{head.strip()}".strip()
+            return rest.strip()
 
-        # An vorhandenen Denktext anhaengen (manche Backends liefern beides:
-        # ein eigenes Feld UND einen Inline-Block). strip() raeumt danach den
-        # fuehrenden Umbruch weg, falls last_thinking vorher leer war.
-        self.last_thinking = f"{self.last_thinking}\n{block}".strip()
+        # Fall 3: ein oeffnendes <think> ohne Abschluss - der Denkprozess lief
+        # ins Token-Limit (MAX_TOKENS), das JSON kam nie. Alles ist Denktext;
+        # "" zurueckgeben macht daraus eine saubere "leere Antwort" zum
+        # Wiederholen, statt den halben Gedankengang als Szene anzuzeigen.
+        if content.lstrip().startswith("<think>"):
+            self.last_thinking = f"{self.last_thinking}\n{content}".strip()
+            return ""
 
-        # sub() ersetzt das Gefundene durch "" - count=1 nur das erste Mal.
-        return _THINK_RE.sub("", content, count=1).strip()
+        return content     # nichts gefunden - unveraendert zurueck
 
 
 class Ollama(LLM):
@@ -585,8 +605,27 @@ class VLLM(LLM):
             "messages": messages,
             "temperature": 0.9,
             "max_tokens": MAX_TOKENS,
-            "response_format": {"type": "json_object"},   # JSON erzwingen
+            # Steuert die Qwen3-Chat-Vorlage. OHNE dieses Feld denkt das
+            # Modell per Default und stellt seiner Antwort einen
+            # <think>...</think>-Block voran. Das Ollama-Backend schaltet das
+            # ueber "think" (siehe Ollama.complete) - hier ist es das
+            # Gegenstueck, damit AIGAME_THINK auf beiden Backends wirkt.
+            "chat_template_kwargs": {"enable_thinking": THINK},
         }
+        # response_format erzwingt gueltiges JSON ab dem ERSTEN Token - der
+        # Server maskiert dazu bei jedem Schritt die verbotenen Tokens weg.
+        # Das vertraegt sich nicht mit dem <think>-Block: dieser vLLM-Build
+        # laeuft ohne --reasoning-parser, die Maske greift also auch waehrend
+        # des Denkens und wuergt es ab. Heraus kam eine leere oder
+        # unbrauchbare Szene - typisch ab Zug 2, wo das Modell erstmals
+        # wirklich ueber die Spielereingabe nachdenken will.
+        #
+        # Denkt das Modell, ueberlassen wir das JSON-Herausloesen deshalb
+        # parse_scene() - die Funktion ist genau dafuer gebaut (Code-Fences,
+        # Vorspann, <think>). Nur ohne Denkprozess schalten wir die Grammatik
+        # wieder zu; dann kann sie nichts kaputtmachen.
+        if not THINK:
+            payload["response_format"] = {"type": "json_object"}
         try:
             data = _json_post(VLLM_URL + "/v1/chat/completions", payload, timeout=600)
         except urllib.error.HTTPError as e:

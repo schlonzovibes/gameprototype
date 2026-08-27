@@ -22,9 +22,9 @@ services:
       # sprengen die frueheren 24576 gegen Ende einer Geschichte.
       AIGAME_NUM_CTX: 40960
       # Antwortlaenge. Im Thinking-Modus muessen Denkprozess UND das
-      # vollstaendige Szenen-JSON hineinpassen - mit 2048 wurde das JSON
-      # abgeschnitten. Betrifft nur vLLM, nicht Ollama.
-      AIGAME_MAX_TOKENS: 4096
+      # vollstaendige Szenen-JSON hineinpassen - mit 2048/4096 wurde das JSON
+      # nach dem Denken abgeschnitten. Betrifft nur vLLM, nicht Ollama.
+      AIGAME_MAX_TOKENS: 8192
       # Anteil des gemeinsamen Speichers fuer vLLM (Gewichte + KV-Cache).
       # 0.78 von 128 GB sind rund 100 GB; der Rest bleibt fuers Bildmodell,
       # das danach geladen wird. Hochsetzen, wenn vLLM beim KV-Cache
@@ -36,6 +36,11 @@ services:
       # Version das Flag nicht -> hier auf "" setzen. Die Ursache steht dann
       # sofort in der Fehlermeldung des Spiels.
       AIGAME_VLLM_ARGS: "--enable-prefix-caching"
+      # Denkprozess vor der Antwort. Wirkt auf beide Backends: Ollama ueber
+      # das "think"-Feld, vLLM ueber chat_template_kwargs.enable_thinking.
+      # Bei vLLM schaltet "1" zusaetzlich die JSON-Grammatik (response_format)
+      # ab - sie und der <think>-Block schliessen sich ohne --reasoning-parser
+      # gegenseitig aus; das JSON kommt dann ueber parse_scene() sauber raus.
       AIGAME_THINK: "1"
       TERM: ${TERM:-xterm-256color}
       TERM_PROGRAM: ${TERM_PROGRAM:-}
