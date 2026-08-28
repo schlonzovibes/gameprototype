@@ -40,17 +40,20 @@ from models import OLLAMA_URL, VLLM_URL, Model
 # gemessen in Tokens (grob: Wortteile). Zu klein -> das Modell vergisst den
 # Anfang der Geschichte, oder der Aufruf scheitert ganz.
 #
-# Ueberschlag, warum 40960 und nicht die frueheren 24576:
+# Ueberschlag des tatsaechlichen Bedarfs:
 #     ~6500   game_prompt.txt + Start-Prompt (der System-Prompt)
 #   ~15600   12 Zuege im Verlauf (HISTORY_TURNS), Szenen-JSON ~1300 je Zug
 #    ~8192   Platz fuer Denkprozess + Antwort (MAX_TOKENS)
 #   -------
-#   ~30300   und damit deutlich mehr, als 24576 hergaben
+#   ~30300   also grob 30k - der Rest bis 65536 ist Reserve.
 #
-# Bei einem quantisierten Modell (NVFP4) sind die Gewichte klein und vom
-# VLLM_GPU_UTIL-Budget bleibt reichlich fuer den KV-Cache - mehr Kontext
-# kostet dort also kaum etwas. Gilt auch fuer Ollama (num_ctx).
-NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "40960"))
+# Warum trotzdem 65536 und nicht knapp ueber 30k: Bei NVFP4 sind die Gewichte
+# klein, und mit --kv-cache-dtype fp8 (siehe AIGAME_VLLM_ARGS) halbiert sich
+# der KV-Cache-Bedarf pro Token nochmal. Vom VLLM_GPU_UTIL-Budget bleibt damit
+# reichlich Platz - mehr Kontext kostet fast nichts und gibt gegen Spielende
+# Luft, falls der Verlauf doch laenger wird als gedacht. Gilt auch fuer Ollama
+# (num_ctx).
+NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "65536"))
 
 # Wie viele Tokens die Antwort hoechstens lang sein darf.
 #
@@ -84,25 +87,45 @@ THINK = os.environ.get("AIGAME_THINK", "0").lower() in ("1", "true", "on", "yes"
 # und muss in den Rest passen. 0.78 laesst dafuer knapp 28 GB.
 VLLM_GPU_UTIL = os.environ.get("AIGAME_VLLM_GPU_UTIL", "0.78")
 
-# Zusaetzliche Flags fuer 'vllm serve', als eine Shell-Zeile.
+# Zusaetzliche Flags fuer 'vllm serve', als eine Shell-Zeile. shlex.split()
+# in _serve() zerlegt sie wie eine echte Shell. Das JSON von
+# --speculative-config MUSS in einfachen Anfuehrungszeichen stehen - sonst
+# frisst shlex die doppelten und aus {"method":"mtp"} wird {method:mtp}.
 #
-# --enable-prefix-caching ist hier der eigentliche Gewinn. Der System-Prompt
-# (game_prompt.txt + Start-Prompt, ~6500 Tokens) ist in JEDER Runde exakt
-# derselbe und wurde bisher jedes Mal komplett neu durch den Prefill
-# geschickt. Mit Prefix-Caching behaelt vLLM dessen KV-Cache und rechnet nur
-# die neu hinzugekommenen Tokens.
+# Der Default hier spiegelt docker-compose.yml wider, damit ein Start OHNE
+# Compose-Env dasselbe Flag-Set nutzt. Diese Flags stammen aus der
+# DGX-Spark-Arena und zielen auf die hoechste Decode-Token-Rate fuer
+# Qwen3.6-35B-A3B-NVFP4 auf GB10:
 #
-# Das greift hier besonders gut: HISTORY_TURNS (12) liegt unter der
-# Szenengrenze (15), der Verlauf wird also die meiste Zeit gar nicht
-# gekuerzt - damit bleibt nicht nur der System-Prompt, sondern fast der
-# ganze Kontext ein stabiler, wiederverwendbarer Praefix.
+# --enable-prefix-caching  Der System-Prompt (~6500 Tokens) ist in JEDER Runde
+#     identisch; vLLM behaelt dessen KV-Cache statt ihn neu durch den Prefill
+#     zu schicken. HISTORY_TURNS (12) < Szenengrenze (15), also bleibt fast
+#     der ganze Kontext ein stabiler, wiederverwendbarer Praefix.
+# --async-scheduling       ueberlappt das Scheduling mit der GPU-Rechnung.
+# --enable-chunked-prefill stueckelt lange Prefills, damit Decode-Schritte
+#     laufender Anfragen nicht warten muessen (wichtig bei unserem grossen
+#     System-Prompt + wachsendem Verlauf).
+# --kv-cache-dtype fp8     halbiert den KV-Cache-Speicher pro Token.
+# --attention-backend flashinfer  schnellere Attention-Kernel auf Blackwell.
+# --moe-backend marlin     der auf NVFP4 optimierte MoE-Pfad (Paarung mit
+#     VLLM_MARLIN_USE_ATOMIC_ADD=1 in der vllm-Service-Env).
+# --max-num-seqs 4         wir bedienen genau einen Spieler - kein Grund, KV
+#     fuer hunderte parallele Sequenzen zu reservieren.
+# --speculative-config ... MTP (Multi-Token-Prediction, die Gewichte bringt
+#     das Modell mit): der groesste Einzelhebel fuer die Decode-Rate.
 #
-# In neueren vLLM-Versionen ist das ohnehin Standard; das Flag doppelt zu
-# setzen schadet nicht. Sollte eine Version es NICHT kennen, weigert sich
-# 'vllm serve' zu starten - dann diese Variable auf "" setzen (siehe
-# docker-compose.yml). Der Fehler steht dank der Logdatei sofort sichtbar
-# in der Meldung, statt erst nach dem Timeout aufzufallen.
-VLLM_EXTRA_ARGS = os.environ.get("AIGAME_VLLM_ARGS", "--enable-prefix-caching")
+# Kennt eine vLLM-Version ein Flag NICHT, weigert sich 'vllm serve' zu starten
+# - dann das betreffende Flag hier bzw. in docker-compose.yml entfernen. Der
+# Fehler steht dank der Logdatei sofort in der Meldung, statt erst nach dem
+# Timeout aufzufallen. --reasoning-parser setzt _serve() separat (fest), weil
+# der Client-Code sich darauf verlaesst.
+VLLM_EXTRA_ARGS = os.environ.get(
+    "AIGAME_VLLM_ARGS",
+    "--enable-prefix-caching --async-scheduling --enable-chunked-prefill "
+    "--kv-cache-dtype fp8 --attention-backend flashinfer --moe-backend marlin "
+    "--max-num-seqs 4 "
+    "--speculative-config "
+    '\'{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}\'')
 
 MAX_SCENES = 15   # nur der Anzeige-Default, falls das Modell nichts meldet
 
@@ -249,10 +272,13 @@ class LLM:
         # Fall 2: nur ein schliessendes </think>, kein oeffnendes. Qwen3 & Co.
         # bekommen das oeffnende <think> schon aus der Chat-Vorlage in den
         # Prompt gelegt - im generierten Text steht dann alles VOR dem ersten
-        # </think> als Denkprozess, ohne Tag davor. Mit --reasoning-parser
-        # wuerde vLLM das sauber in reasoning_content abtrennen; dieser Build
-        # hat keinen, also machen wir es hier. Ohne diesen Zweig zieht
-        # parse_scene() die erste "{" aus dem Denktext und das JSON ist hin.
+        # </think> als Denkprozess, ohne Tag davor.
+        #
+        # Auf dem vLLM-Pfad trennt --reasoning-parser qwen3 (siehe VLLM._serve)
+        # das bereits sauber in reasoning_content ab, dieser Zweig greift dort
+        # also nicht mehr. Er bleibt fuer Ollama und als Netz, falls doch ein
+        # Inline-<think> durchrutscht - ohne ihn zoege parse_scene() die erste
+        # "{" aus dem Denktext und das JSON waere hin.
         head, sep, rest = content.partition("</think>")
         if sep:
             self.last_thinking = f"{self.last_thinking}\n{head.strip()}".strip()
@@ -586,6 +612,14 @@ class VLLM(LLM):
             "--port", VLLM_URL.rsplit(":", 1)[-1],
             "--gpu-memory-utilization", VLLM_GPU_UTIL,
             "--max-model-len", str(NUM_CTX),
+            # Trennt den <think>-Block sauber in message.reasoning_content ab,
+            # sodass die JSON-Grammatik (response_format in complete()) erst
+            # NACH dem </think> greift. Steht hier fest und nicht in
+            # AIGAME_VLLM_ARGS, weil complete() sich darauf verlaesst - ein
+            # versehentliches Entfernen aus der Env-Var wuerde das JSON still
+            # brechen. "qwen3" passt fuer alle Qwen3.6-Varianten im Cache
+            # (gleiche Chat-Vorlage, gleiche <think>-Tags).
+            "--reasoning-parser", "qwen3",
         ] + shlex.split(VLLM_EXTRA_ARGS))
         try:
             # 2>&1 leitet auch die Fehlerausgabe in dieselbe Datei - genau
@@ -611,21 +645,15 @@ class VLLM(LLM):
             # ueber "think" (siehe Ollama.complete) - hier ist es das
             # Gegenstueck, damit AIGAME_THINK auf beiden Backends wirkt.
             "chat_template_kwargs": {"enable_thinking": THINK},
+            # response_format erzwingt gueltiges JSON - der Server maskiert
+            # dazu bei jedem Schritt die verbotenen Tokens weg. Frueher schloss
+            # sich das mit dem <think>-Block aus (die Maske wuergte das Denken
+            # ab, ab Zug 2 kamen leere Szenen). Mit --reasoning-parser qwen3
+            # (siehe _serve) kennt vLLM die </think>-Grenze und legt die
+            # Grammatik erst DANACH an; der Denkprozess bleibt unangetastet
+            # und kommt getrennt in message.reasoning_content zurueck.
+            "response_format": {"type": "json_object"},
         }
-        # response_format erzwingt gueltiges JSON ab dem ERSTEN Token - der
-        # Server maskiert dazu bei jedem Schritt die verbotenen Tokens weg.
-        # Das vertraegt sich nicht mit dem <think>-Block: dieser vLLM-Build
-        # laeuft ohne --reasoning-parser, die Maske greift also auch waehrend
-        # des Denkens und wuergt es ab. Heraus kam eine leere oder
-        # unbrauchbare Szene - typisch ab Zug 2, wo das Modell erstmals
-        # wirklich ueber die Spielereingabe nachdenken will.
-        #
-        # Denkt das Modell, ueberlassen wir das JSON-Herausloesen deshalb
-        # parse_scene() - die Funktion ist genau dafuer gebaut (Code-Fences,
-        # Vorspann, <think>). Nur ohne Denkprozess schalten wir die Grammatik
-        # wieder zu; dann kann sie nichts kaputtmachen.
-        if not THINK:
-            payload["response_format"] = {"type": "json_object"}
         try:
             data = _json_post(VLLM_URL + "/v1/chat/completions", payload, timeout=600)
         except urllib.error.HTTPError as e:

@@ -18,9 +18,10 @@ services:
       # Sprach- UND Bildmodelle liegen im selben HF-Cache (/root/.cache);
       # models.py findet ihn ohne weitere Konfiguration.
 
-      # Kontextfenster. ~6500 System-Prompt + 12 Zuege Verlauf + Antwort
-      # sprengen die frueheren 24576 gegen Ende einer Geschichte.
-      AIGAME_NUM_CTX: 40960
+      # Kontextfenster. Bedarf liegt bei ~30k (System-Prompt + 12 Zuege +
+      # Antwort); 65536 ist Reserve. Mit --kv-cache-dtype fp8 (unten) kostet
+      # der groessere Cache kaum Speicher. Wirkt auf vLLM und Ollama.
+      AIGAME_NUM_CTX: 65536
       # Antwortlaenge. Im Thinking-Modus muessen Denkprozess UND das
       # vollstaendige Szenen-JSON hineinpassen - mit 2048/4096 wurde das JSON
       # nach dem Denken abgeschnitten. Betrifft nur vLLM, nicht Ollama.
@@ -30,17 +31,37 @@ services:
       # das danach geladen wird. Hochsetzen, wenn vLLM beim KV-Cache
       # abbricht - runter, wenn danach FLUX nicht mehr passt.
       AIGAME_VLLM_GPU_UTIL: "0.78"
-      # Zusaetzliche Flags fuer 'vllm serve'. Prefix-Caching spart den
-      # Prefill des ~6500-Token-System-Prompts in JEDER Runde.
+      # Zusaetzliche Flags fuer 'vllm serve' - Durchsatz-Tuning aus der
+      # DGX-Spark-Arena fuer Qwen3.6-35B-A3B-NVFP4 (hoechste Token-Rate):
+      #   --enable-prefix-caching   spart den Prefill des ~6500-Token-
+      #                             System-Prompts in JEDER Runde
+      #   --async-scheduling        Scheduling parallel zur GPU-Rechnung
+      #   --enable-chunked-prefill  lange Prefills stueckeln, Decode stockt nicht
+      #   --kv-cache-dtype fp8      halbiert den KV-Cache pro Token
+      #   --attention-backend flashinfer  schnellere Attention auf Blackwell
+      #   --moe-backend marlin      NVFP4-optimierter MoE-Pfad (Paarung mit
+      #                             VLLM_MARLIN_USE_ATOMIC_ADD im vllm-Service)
+      #   --max-num-seqs 4          wir bedienen genau einen Spieler
+      #   --speculative-config ...  MTP-Speculative-Decoding, groesster Hebel
+      # --reasoning-parser qwen3 setzt der Code separat (llm.VLLM._serve).
       # Weigert sich vLLM zu starten ("unrecognized arguments"), kennt diese
-      # Version das Flag nicht -> hier auf "" setzen. Die Ursache steht dann
+      # Version ein Flag nicht -> das Flag hier entfernen. Die Ursache steht
       # sofort in der Fehlermeldung des Spiels.
-      AIGAME_VLLM_ARGS: "--enable-prefix-caching"
+      # Das JSON MUSS in einfachen Anfuehrungszeichen stehen, sonst frisst
+      # shlex.split() in llm.py die doppelten.
+      AIGAME_VLLM_ARGS: >-
+        --enable-prefix-caching
+        --async-scheduling
+        --enable-chunked-prefill
+        --kv-cache-dtype fp8
+        --attention-backend flashinfer
+        --moe-backend marlin
+        --max-num-seqs 4
+        --speculative-config '{"method":"mtp","num_speculative_tokens":3,"moe_backend":"triton"}'
       # Denkprozess vor der Antwort. Wirkt auf beide Backends: Ollama ueber
       # das "think"-Feld, vLLM ueber chat_template_kwargs.enable_thinking.
-      # Bei vLLM schaltet "1" zusaetzlich die JSON-Grammatik (response_format)
-      # ab - sie und der <think>-Block schliessen sich ohne --reasoning-parser
-      # gegenseitig aus; das JSON kommt dann ueber parse_scene() sauber raus.
+      # Bei vLLM trennt --reasoning-parser qwen3 (llm.VLLM._serve) den
+      # Denkprozess ab, die JSON-Grammatik (response_format) bleibt dabei an.
       AIGAME_THINK: "1"
       TERM: ${TERM:-xterm-256color}
       TERM_PROGRAM: ${TERM_PROGRAM:-}
@@ -80,6 +101,9 @@ services:
       - ~/git/gameprototype/cache:/root/.cache
     environment:
       - HF_TOKEN=${HF_TOKEN}
+      # Paarung mit '--moe-backend marlin' (AIGAME_VLLM_ARGS): schnellere
+      # Reduktion im NVFP4-MoE-Kernel.
+      - VLLM_MARLIN_USE_ATOMIC_ADD=1
     # laeuft idle; llm.VLLM.load() startet 'vllm serve <modell>' per exec
     command: ["sleep", "infinity"]
     deploy:
