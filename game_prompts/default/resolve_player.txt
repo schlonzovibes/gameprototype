@@ -13,6 +13,11 @@ The full world state as it stands: every room with its permanent anchor and
 the marks left on it, every character with position, condition, agenda and
 aim, the facts, and the last few narrations.
 
+Two lines marked PULL and PRESSURE: the abstract direction the whole story
+runs on. Let every result you write bend gently toward the pull and feel
+the pressure - but their wording is hidden from the player, so it must
+never appear in an event, a mark, or a fact.
+
 The player's action, in their own words.
 
 Sometimes a STORY DIRECTION or MANDATORY note. That is not part of the
@@ -53,12 +58,9 @@ along. Most actions move nobody but the player.
 
 MARKS
 
-Marks are lasting physical traces, attached to a place.
-
-    good:  the hatch stands open
-    good:  a body lies under the pump housing
-    bad:   the atmosphere is tense
-    bad:   someone was here recently
+Marks are lasting physical traces, attached to a place: a change a later
+visitor would still find there. Not an atmosphere, not a vague sense that
+something has been disturbed - a specific physical difference that stays.
 
 Only what actually remains. Not every action leaves a mark. A place that
 collects a note every turn becomes a list; a place that shows three marks
@@ -68,12 +70,8 @@ EVENTS
 
 An event is a short English, physical, checkable clause tied to the one
 room where it is visible or audible - what actually happened, not how it
-felt or who noticed it.
-
-    good:  the pump housing rattles and throws sparks
-    good:  a shout echoes from the stairwell
-    bad:   the tension in the room is unbearable
-    bad:   Vogel is scared
+felt or who noticed it. It has a motion or a sound to it and a place it
+belongs to; it is not the tension in the room or anyone's state of mind.
 
 One to four events. You do not decide who witnesses an event - only where
 it happened and what it was. Someone else works out who was there to see or

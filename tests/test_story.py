@@ -195,16 +195,11 @@ class QuotaNotbremseTest(GameTestCase):
         self.assertEqual(player_resolve_calls, 1)
         game.close()
 
-    def test_fallback_fires_even_when_attempt_falls_short_of_the_quota(self):
-        """Regression: das Modell VERSUCHT eine Figur einzufuehren (die
-        Notbremse-Schleife bricht deshalb sofort nach dem ersten Versuch
-        ab - delta_p.characters_introduced ist nicht leer), aber davon
-        ausgehend, dass noch KEINE Figur existiert, reicht eine einzelne
-        neue Figur nicht, um die Quote (mindestens 3) zu erfuellen. Ein
-        Fallback, der nur auf "hat das Modell ueberhaupt etwas versucht"
-        prueft statt auf die tatsaechliche Quote NACH dem Anwenden, wuerde
-        das faelschlich als erledigt behandeln."""
-        class PartialAttemptEngine(FakeEngine):
+    def test_one_valid_introduction_satisfies_the_quota(self):
+        """Ein einziger gueltig eingefuehrter Charakter erfuellt die Quote
+        (1 Figur bis Zug 5) - die Schleife bricht nach dem ersten Versuch
+        ab, und die Notbremse legt KEINEN zusaetzlichen Fallback an."""
+        class OneCharacterEngine(FakeEngine):
             def structured(self, messages, model_cls, retries=1):
                 self.calls.append(model_cls.__name__)
                 if model_cls.__name__ == "ResolvePlayer":
@@ -214,7 +209,7 @@ class QuotaNotbremseTest(GameTestCase):
                     return _fill(model_cls, {"characters_introduced": [one]})
                 return _fill(model_cls)
 
-        engine = PartialAttemptEngine()
+        engine = OneCharacterEngine()
         game = self._game(engine)
         world = World(
             language="en",
@@ -226,12 +221,8 @@ class QuotaNotbremseTest(GameTestCase):
         game.advance("do nothing")
 
         player_resolve_calls = sum(1 for c in engine.calls if c == "ResolvePlayer")
-        self.assertEqual(player_resolve_calls, 1,
-                         "the loop breaks after one attempt since the model "
-                         "did try - falling short is only visible after apply_turn")
-        self.assertEqual(len(game.world.characters), 2,
-                         "the one introduced character plus the fallback - "
-                         "one alone does not satisfy the quota of three")
+        self.assertEqual(player_resolve_calls, 1)
+        self.assertEqual([c.name for c in game.world.characters.values()], ["Sailor"])
         game.close()
 
 

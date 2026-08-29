@@ -73,8 +73,9 @@ nennt) ins Debug-Log, ohne das Spiel abzubrechen.
 
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import llm
@@ -196,7 +197,15 @@ class Game:
         self.world: World | None = None
 
         DEBUG_DIR.mkdir(exist_ok=True)
-        self.log = _log_path(start_prompt).open("w", encoding="utf-8")
+        log_path = _log_path(start_prompt)
+        self.log = log_path.open("w", encoding="utf-8")
+        # Zweites Log DANEBEN: der komplette Weltzustand als JSON, ein
+        # Schnappschuss je abgeschlossener Runde (siehe _log_json). Gleicher
+        # Dateiname mit Prefix "JSON_", also JSON_<slug>.txt - damit man die
+        # ANHAeufung aller Werte ueber die Szenen nachvollziehen kann, nicht
+        # nur den gerenderten Klartext des Haupt-Logs.
+        self.json_log = log_path.with_name(
+            f"JSON_{log_path.name}").open("w", encoding="utf-8")
 
     # ------------------------------------------------------------ Aufrufe
 
@@ -249,6 +258,7 @@ class Game:
         self.world.remember(narration)
 
         self._log_block("STATE after init", self.world.render())
+        self._log_json("scene 1 / after init")
 
         return Beat(
             narration=narration,
@@ -286,10 +296,11 @@ class Game:
         turn_number = world.scene_number + 1
 
         # --- 1. Spieler-Resolve, mit Charakterquote-Notbremse ---
-        # Ab Runde 6 (turn_number > 5) ist ein neuer Charakter PFLICHT,
-        # solange die Quote (mindestens 3 Figuren) nicht erfuellt ist. Bis
-        # zu zwei Wiederholungsversuche generieren neue KANDIDATEN - erst
-        # der finale wird angewendet (siehe unten, warum nicht frueher).
+        # Ab Runde 6 (turn_number > 5) ist ein Charakter PFLICHT, solange
+        # ueberhaupt keine Figur existiert (INIT setzt normalerweise schon
+        # 0-2 in den Startraum, dann greift das nie). Bis zu zwei
+        # Wiederholungsversuche generieren neue KANDIDATEN - erst der finale
+        # wird angewendet (siehe unten, warum nicht frueher).
         direction = world.character_quota_status(turn_number)
         mandatory = turn_number > 5 and bool(direction)
         delta_p = None
@@ -372,6 +383,7 @@ class Game:
         # andere: an ihm sieht man, was das Modell in der NAECHSTEN Runde
         # tatsaechlich zu sehen bekommt.
         self._log_block("STATE", world.render())
+        self._log_json(f"scene {world.scene_number} / after round")
 
         return Beat(
             narration=narration,
@@ -383,6 +395,7 @@ class Game:
 
     def close(self) -> None:
         self.log.close()
+        self.json_log.close()
 
     # ------------------------------------------------------------ intern
 
@@ -534,6 +547,30 @@ class Game:
         # Sofort schreiben: bei einem Absturz ist gerade der letzte Block
         # der interessante, und der stuende sonst noch im Puffer.
         self.log.flush()
+
+    def _log_json(self, label: str) -> None:
+        """Den vollen Weltzustand als JSON in die JSON_<slug>.txt schreiben.
+
+        Ein Schnappschuss je abgeschlossener Runde (nach dem kompletten
+        LLM-Durchlauf; die Bilderzeugung danach aendert den Zustand nicht
+        mehr). Die Datei ist kein einzelnes JSON-Dokument, sondern eine Kette
+        aus "===== label ====="-Bloecken mit je EINEM vollstaendigen,
+        eingerueckten Objekt - so sieht man, wie Knoten, Figuren, Marks,
+        Facts usw. ueber die Szenen anwachsen.
+
+        dataclasses.asdict() klappt den ganzen World-Baum (Node, Character,
+        Exit) auf; round_log traegt NamedTuples, die per _asdict() zu
+        benannten Feldern werden statt zu positionellen Listen.
+        ensure_ascii=False haelt die Spielsprache lesbar.
+        """
+        if self.world is None:                       # pragma: no cover
+            return
+        snapshot = asdict(self.world)
+        snapshot["round_log"] = [e._asdict() for e in self.world.round_log]
+        self.json_log.write(f"===== {label} =====\n")
+        self.json_log.write(json.dumps(snapshot, indent=2, ensure_ascii=False))
+        self.json_log.write("\n\n")
+        self.json_log.flush()
 
     def _log_thinking(self) -> None:
         # THINKING steht IMMER da - eine fehlende Sektion waere sonst nicht

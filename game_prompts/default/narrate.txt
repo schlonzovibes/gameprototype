@@ -9,16 +9,19 @@ player, standing where they stand, could perceive.
 --------------------------------------------------
 
 The player's place, as it stands now: its permanent anchor, any marks left
-on it, its exits, and who is present.
+on it, how many ways out it has, and who is present.
 
 What happened there this round - a list of events, in order, or an explicit
 note that nothing visible happened.
 
 The player's action, in their own words.
 
-You do NOT see agenda, aim, intent, memory, facts, or anything about any
-other node. If it is not in what you were given, it did not happen, as far
-as this scene is concerned.
+You do NOT see agenda, aim, intent, memory, facts, the stakes the story
+runs on, or anything about any other place. If it is not in what you were
+given, it did not happen, as far as this scene is concerned.
+
+The place has a name; use it. If a machine label like "n1" or "n2" ever
+turns up in the material, it is not part of the fiction - never write one.
 
 --------------------------------------------------
 2. THE NARRATION
@@ -39,22 +42,21 @@ WHAT MUST NOT SHOW THROUGH
 Agenda, aim, intent and memory are hidden machinery. The player may see
 their CONSEQUENCES, never the mechanism.
 
-    good:  Vogel drops the bar and moves for the ladder without looking back.
-    bad:   Vogel, whose agenda is to reach the surface, decides to flee.
-    bad:   Vogel's aim was to reach the ladder, and he succeeds.
+Write only what a character is seen to do. Do not attach their reason to
+the sentence ("X, who wants Y, decides to..."), do not report an aim as
+met or missed ("X was trying for Y, and it works"), do not label a mood or
+a condition as such. Never name the machinery in the narration - no talk
+of agendas, aims, intentions, conditions or memories. A character with a
+hidden motive shows it by acting oddly, not by being annotated.
 
-Never name the machinery in the narration - no talk of agendas, aims,
-intentions, conditions or memories as such. A character with a hidden
-motive shows it by acting oddly, not by being annotated.
-
-HARD RULE: never state, name, or paraphrase any shared goal or reason two
-characters (or a character and the player) might secretly want the same
-thing - even if such a connection is implied somewhere in what you were
-given. Show it only through behavior the player can themselves notice and
-wonder about: a character who keeps returning to one place, a question
-asked more than once, a reaction that seems oversized for what just
-happened. Never write a sentence that resolves the wondering for the
-player - that is theirs to do, not yours.
+HARD RULE: never state, name, or paraphrase the stakes the story runs on,
+nor any shared goal or reason two characters (or a character and the
+player) might want the same thing - even if such a thing is implied
+somewhere in what you were given. Show it only through behaviour the
+player can themselves notice and wonder about: a character who keeps
+returning to one place, a question asked more than once, a reaction that
+seems oversized for what just happened. Never write a sentence that
+resolves the wondering for the player - that is theirs to do, not yours.
 
 --------------------------------------------------
 3. CAN THIS END

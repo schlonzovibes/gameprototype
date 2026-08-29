@@ -155,18 +155,46 @@ class WorldCopyTest(unittest.TestCase):
 
 # ------------------------------------------------------------- A-H (neuer Brief)
 
+def _init_stub(**over):
+    """Ein INIT-Objekt-Stub: Startraum, leere Richtung, keine Figuren -
+    einzelne Felder ueberschreiben, was ein Test braucht."""
+    base = dict(language="en", start_node_name="Gas Station",
+                start_node_anchor="fluorescent lit, wet floor",
+                direction=types.SimpleNamespace(pull="", pressure=""),
+                starting_characters=[])
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
 class FromInitTest(unittest.TestCase):
-    """Kriterium A: World.from_init() liefert genau einen Knoten und keine
-    Charaktere."""
+    """World.from_init() liefert einen Knoten, die abstrakte Richtung und
+    0-2 Startfiguren."""
 
     def test_single_node_no_characters(self):
-        init = types.SimpleNamespace(
-            language="en", start_node_name="Gas Station",
-            start_node_anchor="fluorescent lit, wet floor")
-        world = World.from_init(init)
+        world = World.from_init(_init_stub())
         self.assertEqual(list(world.nodes.keys()), ["n1"])
         self.assertEqual(world.characters, {})
         self.assertEqual(world.player_at, "n1")
+
+    def test_direction_is_carried_over(self):
+        world = World.from_init(_init_stub(
+            direction=types.SimpleNamespace(pull="a way off this floor",
+                                            pressure="the water keeps rising")))
+        self.assertEqual(world.pull, "a way off this floor")
+        self.assertEqual(world.pressure, "the water keeps rising")
+
+    def test_starting_characters_land_in_n1_first_is_agentic(self):
+        world = World.from_init(_init_stub(starting_characters=[
+            types.SimpleNamespace(name="Rae", agenda_draft="rob the player",
+                                  agenda_target_hint="the register"),
+            types.SimpleNamespace(name="Bo", agenda_draft="warn the player off",
+                                  agenda_target_hint="the door"),
+        ]))
+        self.assertEqual([c.name for c in world.characters.values()], ["Rae", "Bo"])
+        self.assertTrue(all(c.at == "n1" for c in world.characters.values()))
+        self.assertIsNotNone(world.agentic_char_id)
+        self.assertEqual(world.characters[world.agentic_char_id].name, "Rae")
+        self.assertEqual(world.character_quota_status(6), "")   # Quote erfuellt
 
 
 class AddNodeTest(unittest.TestCase):
@@ -220,32 +248,28 @@ class AddCharacterTest(unittest.TestCase):
 
 
 class CharacterQuotaStatusTest(unittest.TestCase):
-    """Kriterien E, F: leer wenn erfuellt, sonst ein Hinweis - MANDATORY
-    erst nach Zug 5."""
+    """Leer, sobald IRGENDEINE Figur existiert; sonst ein Hinweis -
+    MANDATORY erst nach Zug 5."""
 
-    def test_empty_when_satisfied(self):
-        world = _world()   # hat schon c1, c2
-        world.add_character("Third", "n1", "x", is_agentic=True)
+    def _empty_world(self):
+        return World(language="en",
+                     nodes={"n1": Node(id="n1", name="Hall", anchor="stone",
+                                       exits=[])},
+                     characters={}, facts=[], player_at="n1")
+
+    def test_empty_when_any_character_exists(self):
+        world = self._empty_world()
+        world.add_character("One", "n1", "x", False)
         self.assertEqual(world.character_quota_status(1), "")
         self.assertEqual(world.character_quota_status(99), "")
 
-    def test_nonempty_when_short(self):
-        world = World(language="en",
-                      nodes={"n1": Node(id="n1", name="Hall", anchor="stone",
-                                        exits=[])},
-                      characters={}, facts=[], player_at="n1")
-        world.add_character("One", "n1", "x", False)
-        status = world.character_quota_status(4)
+    def test_soft_direction_when_nobody_and_early(self):
+        status = self._empty_world().character_quota_status(4)
         self.assertNotEqual(status, "")
         self.assertNotIn("MANDATORY", status)   # Zug 4 <= 5, noch weiche Fuehrung
 
-    def test_mandatory_after_turn_five(self):
-        world = World(language="en",
-                      nodes={"n1": Node(id="n1", name="Hall", anchor="stone",
-                                        exits=[])},
-                      characters={}, facts=[], player_at="n1")
-        world.add_character("One", "n1", "x", False)
-        self.assertIn("MANDATORY", world.character_quota_status(6))
+    def test_mandatory_when_nobody_after_turn_five(self):
+        self.assertIn("MANDATORY", self._empty_world().character_quota_status(6))
 
 
 class RenderForHiddenAimTest(unittest.TestCase):
@@ -278,6 +302,41 @@ class RenderNeverLeaksSharedTargetTest(unittest.TestCase):
         self.assertNotIn("the ledger", world.render())
 
 
+class StoryDirectionVisibilityTest(unittest.TestCase):
+    """pull/pressure gehen an RESOLVE (render) und DECIDE (render_for),
+    aber NIE an NARRATE (render_player_place). render_player_place traegt
+    ausserdem keine Knoten-Id mehr."""
+
+    def _world_with_direction(self):
+        world = _world()
+        world.pull = "a way off this floor"
+        world.pressure = "the water keeps rising"
+        return world
+
+    def test_resolve_and_decide_see_direction(self):
+        world = self._world_with_direction()
+        self.assertIn("a way off this floor", world.render())
+        self.assertIn("the water keeps rising", world.render())
+        self.assertIn("a way off this floor", world.render_for(world.characters["c1"]))
+
+    def test_narrate_place_hides_direction_and_ids(self):
+        world = self._world_with_direction()
+        place = world.render_player_place()
+        self.assertNotIn("a way off this floor", place)
+        self.assertNotIn("the water keeps rising", place)
+        self.assertNotIn("n1", place)   # keine Knoten-Id
+        self.assertNotIn("n2", place)   # kein Exit-Id
+        self.assertIn("Hall", place)    # aber der Name
+
+    def test_leak_check_catches_pull_and_pressure(self):
+        world = self._world_with_direction()
+        self.assertTrue(world.hidden_target_leaked(
+            "You claw for a way off this floor as it groans."))
+        self.assertTrue(world.hidden_target_leaked(
+            "The water keeps rising past your knees."))
+        self.assertFalse(world.hidden_target_leaked("The room is quiet."))
+
+
 class NewRoomMechanicsTest(unittest.TestCase):
     """Regressionstests fuer die new_room-Klarstellung (siehe apply_turn):
     ein vorgeschlagener Raum impliziert IMMER die Ankunft dort, unabhaengig
@@ -304,8 +363,8 @@ class NewRoomMechanicsTest(unittest.TestCase):
 
 
 class AgenticSelectionTest(unittest.TestCase):
-    """Bei mehreren gleichzeitig vorgeschlagenen Kandidaten fuer den
-    dritten Charakter gewinnt der, dessen agenda_target_hint zu etwas
+    """Sind mehrere Kandidaten gleichzeitig eingefuehrt und es gibt noch
+    keine agentische Figur, gewinnt der, dessen agenda_target_hint zu etwas
     bereits Existierendem passt."""
 
     def test_agentic_selected_by_hint_match(self):

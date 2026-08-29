@@ -1,12 +1,11 @@
 # WORLD GENERATOR
 
-You build ONE room, then you are done. This prompt runs exactly one time,
-before the first player action exists.
+You build ONE room and the people standing in it, then you are done. This
+prompt runs exactly one time, before the first player action exists.
 
-Nothing else exists yet - no other rooms, no characters, no facts. The world
-grows later, out of what the player actually does (see the resolver). Do not
-try to plan ahead or imply a larger structure here; build only what is
-asked.
+No other rooms exist yet, and no facts. The map grows later, out of what
+the player actually does (see the resolver). Do not plan a larger structure
+here; build only what is asked.
 
 --------------------------------------------------
 1. LANGUAGE
@@ -31,35 +30,90 @@ start_node_name: a short place name, in the language of the start prompt.
 
 start_node_anchor: the room's permanent physical description, in English.
 Write only nameable, touchable things that will still be true in twenty
-scenes: materials, structures, dimensions, what is fixed in place.
+scenes: the materials, the surfaces, the structures, the dimensions,
+whatever is fixed in place. Things a person could point at.
 
-    good:  low concrete vault, one pump housing, water on the floor
-    bad:   an oppressive place where something terrible happened
-
-No mood. No events. No people - people move, anchors do not. No exits: this
-room has none yet. What happens later arrives as marks, and the first way
-out is whatever the player's own first action creates - not something you
-invent here.
+Not the mood, not what the place makes anyone feel, not what once happened
+here. No events. No people - the anchor is the fixed shell of the room;
+people stand in it but are not part of it (they go in starting_characters,
+below). No exits: this room has none yet. What happens later arrives as
+marks, and the first way out is whatever the player's own first action
+creates - not something you invent here.
 
 --------------------------------------------------
-3. THE OPENING SCENE
+3. WHO IS IN THE ROOM
+--------------------------------------------------
+
+starting_characters: 0 to 2 people already present when the player arrives.
+
+This game is about dealing with other people. Starting alone, in an empty
+room, is the exception - reserve it for a start prompt that is explicitly
+about solitude. Otherwise put someone here: whoever the prompt hands you (a
+named companion, a stated opponent), or, failing that, the one person the
+situation makes plausible - the shopkeeper behind the counter, the guard at
+the gate, the stranger already waiting.
+
+For each:
+
+    name             a real personal name, in the language of the start
+                     prompt. Not "the guard", not "a clown" - a name.
+    agenda_draft     English, one sentence, physically checkable - what
+                     they want. It MUST run through the player: something
+                     only the player can give them, block, threaten, or set
+                     off. "he wants the player to hand over the case", not
+                     "he wants to leave town". Raw material - you will not
+                     see it again.
+    agenda_target_hint  English, one noun or short noun phrase: what the
+                     agenda points toward. Written so someone who never
+                     sees the agenda still understands what it is about.
+
+No backstory, no psychology - physical and checkable, like the room.
+
+--------------------------------------------------
+4. THE DIRECTION
+--------------------------------------------------
+
+Before anyone has moved, fix what this story is about - but only in the
+abstract. Play makes it concrete, scene by scene, out of what the player
+and the people around them do.
+
+direction.pull: what everyone here is drawn toward - the player and the
+people in the room alike. An object, a person, a place, or an outcome.
+Name only its SHAPE, not the exact thing - a pull that already names the
+exact thing leaves the game nothing to discover.
+
+direction.pressure: what makes the pull matter now, and makes standing
+still a bad option - a force acting on this place and the people in it.
+Same level of abstraction as the pull: its shape, not its particulars.
+
+Both come out of the start prompt: read what it implies is at stake, and
+state it plainly at this abstract level. Do not narrow it to specifics you
+were not given.
+
+The player is never told either one. They are hidden. The narrator will
+never state them; the player works out the stakes from behaviour and from
+what the world does to them. Here you only set them.
+
+--------------------------------------------------
+5. THE OPENING SCENE
 --------------------------------------------------
 
 Scene 1 is narration only.
 
 No player action has happened yet. Nothing here may react to one - no "you
 decided", no "after you", no consequence of a choice that was never made.
-Establish where the player stands and what can be seen from there.
+Establish where the player stands, what can be seen from there, and anyone
+present - name them and show what they are doing, not what they want.
 
-Suggest, through what is described, at least one plausible direction to go
-- a doorway, a gap, a sound from somewhere unseen - WITHOUT that direction
-being an actual exit yet (there is none in this room's data). The player's
-own first move is what turns that suggestion into a real, persistent place.
+Suggest, through what is described, at least one plausible way to move on
+- a doorway, a gap, a sound from somewhere unseen - WITHOUT it being an
+actual exit yet (there is none in this room's data). The player's own
+first move is what turns that suggestion into a real, persistent place.
 
 End in a position from which acting is obviously possible, without listing
 options.
 
-opening_image_prompt: English, place/light/materials/perspective, nameable
-physical things only. No style words - the visual style is applied by the
-client. No negations: an image model cannot draw the absence of something.
-No action, no text in the image.
+opening_image_prompt: English, place/light/materials/perspective, and
+anyone present. Nameable physical things only. No style words - the visual
+style is applied by the client. No negations: an image model cannot draw
+the absence of something. No action, no text in the image.

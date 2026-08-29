@@ -56,25 +56,66 @@ STRICT = {"extra": "forbid"}
 # ------------------------------------------------------- statisch: INIT
 
 def init_model() -> type[BaseModel]:
-    """Der einmalige Weltaufbau - jetzt nur noch EIN Raum, keine Figuren.
+    """Der einmalige Weltaufbau - EIN Raum und 0-2 Figuren darin.
 
     Frueher erzeugte INIT einen vollstaendigen Graphen (7-9 Knoten) samt
     Charakteren VOR dem ersten Spielzug - eine im Voraus geplante
     Levelgeometrie, die ein Sprachmodell danach nur noch abschreitet.
     Playtesting zeigte: entweder haelt sich das Modell daran (dann war das
     Sprachmodell fuer die Navigation ueberfluessig), oder es weicht ab (dann
-    war der Graph verschwendete Arbeit).
+    war der Graph verschwendete Arbeit). Deshalb baut INIT keinen Graphen
+    mehr - jeder weitere Knoten entsteht als Nebenprodukt von
+    resolve_model()s new_room-Feld, sobald die Erzaehlung ihn braucht.
 
-    Jetzt entsteht die Welt WAEHREND des Spielens: INIT liefert nur den
-    Startraum, jeder weitere Knoten entsteht als Nebenprodukt von
-    resolve_model()s new_room-Feld, sobald die Erzaehlung ihn braucht (siehe
-    dort). Der Startraum bekommt seine Id ("n1") vom Client
-    (state.World.from_init), nie vom Modell - deshalb kein id-Feld hier.
+    FIGUREN sind zurueck, aber anders: nicht als Levelplanung, sondern weil
+    die Interaktion mit den Agenten der Kern des Spiels ist - allein in
+    einem leeren Raum zu starten ist die Ausnahme, nicht die Norm. Die
+    Figuren stehen alle im Startraum (dem einzigen, der existiert), deshalb
+    kein at-Feld - der Client setzt "n1" ein (state.World.from_init).
+
+    DIRECTION legt VORAB fest, worauf die Geschichte hinauslaeuft - aber nur
+    abstrakt (pull = wohin gezogen wird, pressure = was draengt). Durch die
+    Handlungen von Spieler und Figuren wird das im Spielverlauf konkret. Es
+    bleibt dem Spieler verborgen (nur RESOLVE/DECIDE sehen es, nie NARRATE
+    im Wortlaut - wie shared_target).
 
     Parameterlos wie narrate_model() - fuer Namenssymmetrie ueber alle vier
-    Aufruftypen (init/decide/resolve/narrate), auch wenn hier nichts
-    Dynamisches injiziert werden muss.
+    Aufruftypen (init/decide/resolve/narrate).
     """
+    class Direction(BaseModel):
+        model_config = STRICT
+
+        pull: str = Field(
+            description="English, one clause, ABSTRACT. What everyone here - "
+                        "the player and the people present - is drawn "
+                        "toward: an object, a person, a place, or an outcome "
+                        "to force. State only the SHAPE of it, never the "
+                        "specific thing - play makes it concrete. Keep it "
+                        "broad enough that the rest of the game still has "
+                        "something to discover.")
+        pressure: str = Field(
+            description="English, one clause, ABSTRACT, same level as pull. "
+                        "What makes the pull matter now and makes waiting a "
+                        "bad option: something closing in, a way out "
+                        "narrowing, a situation coming apart.")
+
+    class StartCharacter(BaseModel):
+        model_config = STRICT
+
+        name: str = Field(
+            description="a real personal name, in the language of the "
+                        "start prompt - not a role or a description")
+        agenda_draft: str = Field(
+            description="English, one sentence, physically checkable - what "
+                        "this character wants. It must put them in contact "
+                        "or conflict with the player. Raw material, not a "
+                        "finished character sheet - you will not see it again.")
+        agenda_target_hint: str = Field(
+            description="English, one noun or short noun phrase: what the "
+                        "agenda points toward (a place, an object, a "
+                        "person). Used by the client to make a decision you "
+                        "never see.")
+
     class Init(BaseModel):
         model_config = STRICT
 
@@ -90,15 +131,29 @@ def init_model() -> type[BaseModel]:
                         "things that can be named and touched, and that "
                         "will still be true in twenty scenes. No mood, no "
                         "events, no people.")
+        direction: Direction = Field(
+            description="the stakes this story runs on, fixed abstractly "
+                        "before anyone acts. Hidden from the player - the "
+                        "narrator never states it; the player infers it "
+                        "from what people and the world do.")
+        starting_characters: list[StartCharacter] = Field(
+            description="0 to 2 characters already in the start room. "
+                        "Include at least one whenever the start prompt "
+                        "gives you anyone to work with - a companion, an "
+                        "opponent, a bystander the situation implies; the "
+                        "game is built around dealing with them. Empty only "
+                        "for a prompt that is explicitly about being alone.")
         opening_narration: str = Field(
             description="scene 1, in the language of the start prompt, "
-                        "second person, 60-120 words. No player action has "
-                        "happened yet, so nothing here may react to one.")
+                        "second person, 60-120 words. Introduce anyone in "
+                        "starting_characters as part of the scene. No player "
+                        "action has happened yet, so nothing here may react "
+                        "to one.")
         opening_image_prompt: str = Field(
             description="English image description of the opening scene: "
-                        "place, light, materials, perspective. Nameable "
-                        "physical things only. No style words, no "
-                        "negations, no action, no text.")
+                        "place, light, materials, perspective, and anyone "
+                        "present. Nameable physical things only. No style "
+                        "words, no negations, no action, no text.")
 
     return Init
 

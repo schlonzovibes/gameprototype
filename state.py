@@ -32,6 +32,7 @@ statt still zu passieren.
 from __future__ import annotations
 
 import copy
+import types
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -144,6 +145,13 @@ class World:
     # NUR hier und in render_for() der agentischen Figur, NIE in render()
     # oder im Kontext von RESOLVE(actor=player)/NARRATE als Wortlaut.
     shared_target: str | None = None
+    # Die abstrakte Richtung der Geschichte, bei INIT gesetzt: pull = worauf
+    # alle zugezogen werden, pressure = was draengt. Zieht Spieler UND
+    # Figuren von Anfang an in eine Richtung; wird durch die Handlungen im
+    # Verlauf konkret. Geht an RESOLVE und DECIDE (render/render_for), NIE
+    # an NARRATE im Wortlaut - hidden_target_leaked() prueft das mit.
+    pull: str = ""
+    pressure: str = ""
     # Id der EINEN agentischen Figur im ganzen Spiel, oder None, solange
     # noch keine bestimmt wurde.
     agentic_char_id: str | None = None
@@ -154,19 +162,35 @@ class World:
     def from_init(cls, init) -> World:
         """Aus dem validierten Init-Objekt eine lebende Welt bauen.
 
-        Anders als frueher liefert INIT nur noch Sprache und den Startraum -
-        keine weiteren Knoten, keine Figuren (die entstehen erst waehrend
-        des Spiels, siehe World.add_node/add_character). Die Id "n1" vergibt
-        der Client, nicht das Modell - INIT kennt gar kein Id-Feld mehr.
+        INIT liefert Sprache, den Startraum und 0-2 Figuren, die schon darin
+        stehen (das Spiel dreht sich um den Umgang mit ihnen - allein zu
+        starten ist die Ausnahme). Weitere Knoten und Figuren entstehen erst
+        waehrend des Spiels (World.add_node / _introduce_characters).
+
+        Die Startfiguren laufen durch dieselbe Maschinerie wie eine spaeter
+        eingefuehrte Figur: _introduce_characters() vergibt die Ids, waehlt
+        die agentische Figur (die erste ueberhaupt) und setzt shared_target.
+        INIT kennt keine Knoten-Id, deshalb wird "n1" hier ergaenzt.
         """
-        return cls(
+        direction = getattr(init, "direction", None)
+        world = cls(
             language=init.language,
             nodes={"n1": Node(id="n1", name=init.start_node_name,
                               anchor=init.start_node_anchor, exits=[])},
             characters={},
             facts=[],
             player_at="n1",
+            pull=getattr(direction, "pull", "") or "",
+            pressure=getattr(direction, "pressure", "") or "",
         )
+        starters = [
+            types.SimpleNamespace(name=c.name, at="n1",
+                                  agenda_draft=c.agenda_draft,
+                                  agenda_target_hint=c.agenda_target_hint)
+            for c in getattr(init, "starting_characters", [])
+        ]
+        world._introduce_characters(starters, [])
+        return world
 
     # ------------------------------------------------------------ Abfragen
 
@@ -263,32 +287,29 @@ class World:
         return char_id
 
     def character_quota_status(self, turn_number: int) -> str:
-        """Der Regiehinweis fuer RESOLVE(actor=player): wie viele Figuren
-        fehlen noch, und ist die Frist (Zug 5) schon ueberschritten?
+        """Der Regiehinweis fuer RESOLVE(actor=player): fehlt noch eine
+        Figur, und ist die Frist (Zug 5) schon ueberschritten?
 
-        Weiche Fuehrung bis einschliesslich Zug 5 ("STORY DIRECTION"), harte
-        Pflicht danach ("MANDATORY") - reine Arithmetik auf
-        len(characters)/agentic_char_id/turn_number, kein Modellzugriff.
-        Leerer String, sobald die Quote (mindestens 3 Figuren) erfuellt ist
-        - kein leeres Feld im Kontext, einfach nichts an dieser Stelle.
+        Meist steht hier nichts: INIT setzt schon 0-2 Figuren in den
+        Startraum (from_init), die Quote ist dann von Anfang an erfuellt.
+        Der Hinweis greift nur, wenn WIRKLICH niemand da ist - weiche
+        Fuehrung bis Zug 5 ("STORY DIRECTION"), harte Pflicht danach
+        ("MANDATORY"). Reine Arithmetik, kein Modellzugriff.
         """
-        needed = max(0, 3 - len(self.characters))
-        if needed == 0:
+        if self.characters:      # schon mindestens eine Figur -> erfuellt
             return ""
 
         if turn_number > 5:
             # Das Modell setzt is_agentic NICHT selbst (das Feld existiert
             # im Schema gar nicht - die Auswahl trifft der Client in
-            # apply_turn, siehe dort). Der Pflichttext verlangt deshalb nur
-            # eine dritte Figur mit brauchbarem agenda_target_hint, nie
-            # is_agentic direkt.
-            return "MANDATORY: this call MUST introduce a new character."
+            # _introduce_characters). Der Pflichttext verlangt nur eine
+            # Figur mit brauchbarem agenda_target_hint.
+            return "MANDATORY: this call MUST introduce a character."
 
         turns_left = max(0, 5 - turn_number)
-        plural = "s" if needed != 1 else ""
-        return (f"STORY DIRECTION: {needed} more character{plural} must "
-                f"appear by turn 5. {turns_left} turn(s) remain. Weave in "
-                f"an opportunity for a new character now.")
+        return (f"STORY DIRECTION: a character must appear by turn 5. "
+                f"{turns_left} turn(s) remain. Introduce one where the "
+                f"scene gives a natural occasion.")
 
     def spawn_fallback_character(self, names_pool: list[str]) -> str:
         """Client-seitiger Notanker, wenn selbst die Notbremse (3 gescheiterte
@@ -343,10 +364,22 @@ class World:
 
         if self.facts:
             lines.append("FACTS: " + " | ".join(self.facts))
+        lines.extend(self._direction_lines())
         if self.recent:
             lines.append("RECENTLY: " + " | ".join(self.recent))
 
         return "\n".join(lines)
+
+    def _direction_lines(self) -> list[str]:
+        """Die abstrakte Story-Richtung als Regieblock - fuer RESOLVE und
+        DECIDE, damit Spieler UND Figuren in dieselbe Richtung streben. NIE
+        von render_player_place() aufgerufen: NARRATE bekommt sie nicht."""
+        out = []
+        if self.pull:
+            out.append(f"PULL (never say this - move everyone toward it): {self.pull}")
+        if self.pressure:
+            out.append(f"PRESSURE (never say this - let it bear down): {self.pressure}")
+        return out
 
     def render_for(self, char: Character) -> str:
         """Der gefilterte Kontext fuer den DECIDE-Aufruf.
@@ -380,6 +413,10 @@ class World:
         ]
         if char.id == self.agentic_char_id and self.shared_target:
             lines.append(f"YOUR HIDDEN AIM RELATES TO: {self.shared_target}")
+        # Die Story-Richtung geht an JEDE Figur (nicht nur die agentische):
+        # sie soll spueren, wohin es zieht und was draengt, auch wenn ihre
+        # eigene agenda etwas anderes will. Nie aussprechen.
+        lines.extend(self._direction_lines())
         lines += [
             "",
             f'YOU ARE AT {node.id} "{node.name}"',
@@ -413,9 +450,20 @@ class World:
         story.Game._narrate) die Events, die er dort wahrnehmen konnte.
         """
         node = self.nodes[self.player_at]
-        lines = [f'{node.id} "{node.name}"', f"  {node.anchor}"]
+        # KEINE Knoten-Id hier: NARRATE erzeugt kein Delta und referenziert
+        # nie einen Knoten - eine Id wie "n1" waere fuer den Erzaehler nur
+        # Text, den er versehentlich abschreiben kann (und getan hat). Auch
+        # die Ausgaenge nur als Anzahl + Einbahn-Begruendungen, nicht als
+        # Id-Liste.
+        lines = [node.name, f"  {node.anchor}"]
         lines.extend(f"  {mark}" for mark in node.marks)
-        lines.append(f"  exits: {self._exit_text(node)}")
+        if node.exits:
+            oneways = [e.justification for e in node.exits
+                       if e.one_way and e.justification]
+            extra = f" ({'; '.join(oneways)})" if oneways else ""
+            lines.append(f"  ways out: {len(node.exits)}{extra}")
+        else:
+            lines.append("  ways out: none yet")
         present = [c for c in self.characters.values()
                   if c.status == "active" and c.at == self.player_at]
         if present:
@@ -423,8 +471,8 @@ class World:
         return "\n".join(lines)
 
     def hidden_target_leaked(self, narrator_text: str) -> bool:
-        """Ist das verborgene gemeinsame Ziel woertlich in narrator_text
-        durchgesickert?
+        """Ist das verborgene gemeinsame Ziel ODER die Story-Richtung
+        (pull/pressure) woertlich in narrator_text durchgesickert?
 
         Diese Pruefung lebt bewusst HIER und nicht in story.py, obwohl sie
         story.Game._narrate aufruft: der Feldname des verborgenen Ziels
@@ -434,10 +482,15 @@ class World:
         zugreifen und ihn damit selbst schreiben.
 
         Bewusst nur ein einfacher Teilstring-Vergleich, keine Nominalphrasen-
-        Extraktion - Letzteres waere ein eigenes Textverstehens-Problem.
+        Extraktion - Letzteres waere ein eigenes Textverstehens-Problem. Bei
+        pull/pressure (ganze Klauseln) ist ein woertlicher Treffer selten,
+        aber wenn er kommt, ist er ein echtes Leck.
         """
-        target = self.shared_target
-        return bool(target) and target.lower() in narrator_text.lower()
+        haystack = narrator_text.lower()
+        for secret in (self.shared_target, self.pull, self.pressure):
+            if secret and secret.lower() in haystack:
+                return True
+        return False
 
     def remember(self, narration: str) -> None:
         """Eine neue Erzaehlung als stilistischen Anker vormerken.
@@ -646,17 +699,16 @@ class World:
     def _introduce_characters(self, new_chars, rejected: list[str]) -> None:
         """0-2 vorgeschlagene Figuren tatsaechlich anlegen.
 
-        Wird der DRITTE Charakter insgesamt eingefuehrt (und existiert noch
-        keine agentische Figur), waehlt der Client - NICHT das Modell - wer
-        davon agentisch wird (Spielregel: genau einer im ganzen Spiel).
-        Stecken mehrere Kandidaten im selben Aufruf, entscheidet
-        _pick_agentic_index() zwischen ihnen.
+        Die ERSTE Figur im ganzen Spiel wird agentisch - egal ob sie aus
+        INIT kommt oder aus einem spaeteren Zug (Spielregel: genau eine
+        agentische Figur, und das agentische Spiel soll frueh laufen, weil
+        der Umgang mit den Agenten der Kern ist). Stecken mehrere Kandidaten
+        im selben Aufruf und es gibt noch keine agentische, entscheidet
+        _pick_agentic_index() zwischen ihnen - NICHT das Modell.
         """
         new_chars = list(new_chars[:2])   # 0-2 laut Schema, defensiv gekappt
 
-        would_complete_trio = (self.agentic_char_id is None
-                               and len(self.characters) == 2)
-        if would_complete_trio and len(new_chars) > 1:
+        if self.agentic_char_id is None and len(new_chars) > 1:
             idx = self._pick_agentic_index(new_chars)
             new_chars[0], new_chars[idx] = new_chars[idx], new_chars[0]
 
@@ -664,10 +716,8 @@ class World:
             if nc.at not in self.nodes:
                 rejected.append(f"character {nc.name}: unknown node {nc.at}")
                 continue
-            make_agentic = (self.agentic_char_id is None
-                            and len(self.characters) == 2)
-            char_id = self.add_character(nc.name, nc.at, nc.agenda_draft,
-                                         make_agentic)
+            make_agentic = self.agentic_char_id is None
+            self.add_character(nc.name, nc.at, nc.agenda_draft, make_agentic)
             if make_agentic:
                 self.shared_target = self._derive_shared_target(
                     nc.agenda_target_hint)

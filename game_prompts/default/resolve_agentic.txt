@@ -12,7 +12,10 @@ do not decide whether the game ends.
 The full world state as it now stands (already reflecting the player's own
 action this round): every room with its permanent anchor and the marks left
 on it, every character with position, condition, agenda and aim, the facts,
-and the last few narrations.
+and the last few narrations. Also two lines marked PULL and PRESSURE - the
+abstract direction the story runs on; bend results toward the pull, let the
+pressure bear down, but never let either one's wording surface in an event,
+mark, or fact.
 
 The character's decided intent: what they are trying to do, what they say,
 where they try to go - already decided by them, elsewhere, from their own
@@ -53,11 +56,9 @@ this attempt is what makes them move.
 
 MARKS
 
-Marks are lasting physical traces, attached to a place.
-
-    good:  the hatch stands open
-    good:  a body lies under the pump housing
-    bad:   the atmosphere is tense
+Marks are lasting physical traces, attached to a place: a change a later
+visitor would still find there. Not an atmosphere, not a sense that
+something is off - a specific physical difference that stays.
 
 Only what actually remains.
 
@@ -65,10 +66,9 @@ EVENTS
 
 An event is a short English, physical, checkable clause tied to the one
 room where it is visible or audible - what actually happened, not how it
-felt or who noticed it. One to four events.
-
-    good:  the pump housing rattles and throws sparks
-    bad:   Vogel is scared
+felt or who noticed it. It has a motion or a sound to it and a place it
+belongs to; it is not tension or anyone's state of mind. One to four
+events.
 
 You do not decide who witnesses an event, only where it happened and what
 it was.
@@ -100,6 +100,6 @@ attempts. NEITHER may appear as text in your events or marks - events
 describe what is physically visible or audible, never what is wanted,
 planned, or hoped for.
 
-    good:  Vogel lingers by the ledger a moment too long before moving on
-    bad:   Vogel is looking for the same thing the player is
-    bad:   Vogel's hidden aim draws him back here again
+A hesitation, a glance held a beat too long, a path retraced - those are
+visible and allowed. Naming the want behind them, or the thing two parties
+are both reaching for, is not.

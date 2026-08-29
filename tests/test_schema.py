@@ -10,14 +10,26 @@ import schema
 
 
 class InitModelTest(unittest.TestCase):
-    def test_no_graph_no_characters(self):
-        """INIT erzeugt nur noch den Startraum, keinen Graphen, keine
-        Figuren (siehe Brief 8.1)."""
+    def test_field_shape(self):
+        """INIT erzeugt den Startraum, die abstrakte Richtung und 0-2
+        Figuren, keinen Graphen. direction und starting_characters stehen
+        VOR der Erzaehlung, damit die Erzaehlung sie aufgreifen kann."""
         Init = schema.init_model()
         self.assertEqual(
             list(Init.model_fields.keys()),
-            ["language", "start_node_name", "start_node_anchor",
-             "opening_narration", "opening_image_prompt"])
+            ["language", "start_node_name", "start_node_anchor", "direction",
+             "starting_characters", "opening_narration", "opening_image_prompt"])
+
+    def test_start_character_fields(self):
+        Init = schema.init_model()
+        StartChar = Init.model_fields["starting_characters"].annotation.__args__[0]
+        self.assertEqual(list(StartChar.model_fields.keys()),
+                         ["name", "agenda_draft", "agenda_target_hint"])
+
+    def test_direction_fields(self):
+        Init = schema.init_model()
+        Direction = Init.model_fields["direction"].annotation
+        self.assertEqual(list(Direction.model_fields.keys()), ["pull", "pressure"])
 
 
 class DecideModelTest(unittest.TestCase):
