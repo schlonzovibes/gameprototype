@@ -27,10 +27,10 @@ services:
       # nach dem Denken abgeschnitten. Betrifft nur vLLM, nicht Ollama.
       AIGAME_MAX_TOKENS: 8192
       # Anteil des gemeinsamen Speichers fuer vLLM (Gewichte + KV-Cache).
-      # 0.78 von 128 GB sind rund 100 GB; der Rest bleibt fuers Bildmodell,
+      # 0.7 von 128 GB sind rund 90 GB; der Rest bleibt fuers Bildmodell,
       # das danach geladen wird. Hochsetzen, wenn vLLM beim KV-Cache
       # abbricht - runter, wenn danach FLUX nicht mehr passt.
-      AIGAME_VLLM_GPU_UTIL: "0.78"
+      AIGAME_VLLM_GPU_UTIL: "0.7"
       # Zusaetzliche Flags fuer 'vllm serve' - Durchsatz-Tuning aus der
       # DGX-Spark-Arena fuer Qwen3.6-35B-A3B-NVFP4 (hoechste Token-Rate):
       #   --enable-prefix-caching   spart den Prefill des ~6500-Token-

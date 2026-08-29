@@ -193,8 +193,17 @@ class Story:
         # "=" * 20 ergibt eine Reihe von zwanzig Gleichheitszeichen.
         self.log.write(f"{'=' * 20} scene {scene.number} {'=' * 20}\n\n")
 
-        if self.engine.last_thinking:
-            self.log.write("[THINKING]\n" + self.engine.last_thinking.strip() + "\n\n")
+        # [THINKING] steht IMMER da - eine fehlende Sektion waere sonst nicht
+        # von "Modell hat nicht gedacht" zu unterscheiden. Ist sie leer,
+        # obwohl THINK an ist, ist das selbst ein Debug-Signal (Reasoning-
+        # Parser aus? Grammatik wuergt das Denken? Token-Limit im Denken?).
+        thinking = (self.engine.last_thinking or "").strip()
+        if thinking:
+            self.log.write("[THINKING]\n" + thinking + "\n\n")
+        elif llm.THINK:
+            self.log.write("[THINKING]\n(leer - kein Denkprozess empfangen)\n\n")
+        else:
+            self.log.write("[THINKING]\n(deaktiviert - AIGAME_THINK=0)\n\n")
 
         self.log.write("[OUTPUT]\n" + scene.raw.strip() + "\n\n" + "-" * 60 + "\n\n")
 

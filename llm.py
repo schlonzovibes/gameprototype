@@ -76,7 +76,7 @@ THINK = os.environ.get("AIGAME_THINK", "0").lower() in ("1", "true", "on", "yes"
 
 # Anteil des GPU-Speichers, den vLLM fuer sich reservieren darf - Gewichte
 # UND KV-Cache zusammen. Auf dem DGX Spark (128 GB gemeinsamer Speicher)
-# entsprechen 0.78 rund 100 GB.
+# entsprechen 0.7 rund 90 GB.
 #
 # Zu niedrig ist gefaehrlicher als zu hoch: vLLM laedt die Gewichte trotzdem
 # und scheitert erst danach beim KV-Cache - man sieht den Speicher volllaufen
@@ -84,8 +84,10 @@ THINK = os.environ.get("AIGAME_THINK", "0").lower() in ("1", "true", "on", "yes"
 # weniger als ein 80-GB-Modell allein schon braucht.
 #
 # Nach oben begrenzt das Bildmodell: es wird NACH dem Sprachmodell geladen
-# und muss in den Rest passen. 0.78 laesst dafuer knapp 28 GB.
-VLLM_GPU_UTIL = os.environ.get("AIGAME_VLLM_GPU_UTIL", "0.78")
+# und muss in den Rest passen. 0.7 laesst dafuer knapp 38 GB. Mit
+# --kv-cache-dtype fp8 (AIGAME_VLLM_ARGS) reicht das kleinere Budget auch
+# fuer den KV-Cache locker.
+VLLM_GPU_UTIL = os.environ.get("AIGAME_VLLM_GPU_UTIL", "0.7")
 
 # Zusaetzliche Flags fuer 'vllm serve', als eine Shell-Zeile. shlex.split()
 # in _serve() zerlegt sie wie eine echte Shell. Das JSON von
@@ -567,7 +569,7 @@ class VLLM(LLM):
 
         Wird beim Beenden des Spiels aufgerufen (main.py). Ohne das bliebe
         der ueber VLLM_GPU_UTIL reservierte Speicher (auf dem DGX Spark oft
-        ~100 GB) belegt - und danach laesst sich kein Ollama mehr laden.
+        ~90 GB) belegt - und danach laesst sich kein Ollama mehr laden.
 
         Der Container selbst bleibt ausdruecklich laufen (kein 'compose
         down'): nur der Service endet, der Container wartet weiter in seinem
@@ -663,7 +665,11 @@ class VLLM(LLM):
         # Hier ohne .get(): fehlt "choices", ist die Antwort so kaputt, dass
         # ein lauter Fehler ehrlicher ist als ein stiller Ersatzwert.
         message = data["choices"][0]["message"]
-        self.last_thinking = message.get("reasoning_content") or ""
+        # Das abgetrennte Denken steht je nach vLLM-Version/Parser in
+        # "reasoning_content" (DeepSeek-Konvention) ODER "reasoning" (dieser
+        # 0.27er-Build mit --reasoning-parser qwen3). Beide pruefen.
+        self.last_thinking = (message.get("reasoning_content")
+                              or message.get("reasoning") or "")
         content = self._split_thinking((message.get("content") or "").strip())
 
         if not content:
