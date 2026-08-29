@@ -90,7 +90,8 @@ THINK = os.environ.get("AIGAME_THINK", "0").lower() in ("1", "true", "on", "yes"
 
 # Anteil des GPU-Speichers, den vLLM fuer sich reservieren darf - Gewichte
 # UND KV-Cache zusammen. Auf dem DGX Spark (128 GB gemeinsamer Speicher)
-# entsprechen 0.78 rund 100 GB.
+# entsprechen 0.65 rund 83 GB - der Wert aus dem Arena-Rezept (siehe
+# VLLM_EXTRA_ARGS unten).
 #
 # Zu niedrig ist gefaehrlicher als zu hoch: vLLM laedt die Gewichte trotzdem
 # und scheitert erst danach beim KV-Cache - man sieht den Speicher volllaufen
@@ -98,28 +99,48 @@ THINK = os.environ.get("AIGAME_THINK", "0").lower() in ("1", "true", "on", "yes"
 # weniger als ein 80-GB-Modell allein schon braucht.
 #
 # Nach oben begrenzt das Bildmodell: es wird NACH dem Sprachmodell geladen
-# und muss in den Rest passen. 0.78 laesst dafuer knapp 28 GB.
-VLLM_GPU_UTIL = os.environ.get("AIGAME_VLLM_GPU_UTIL", "0.78")
+# und muss in den Rest passen. 0.65 laesst dafuer ~45 GB - und mit
+# --kv-cache-dtype fp8 (VLLM_EXTRA_ARGS) reicht das kleinere Budget dem
+# KV-Cache trotzdem locker.
+VLLM_GPU_UTIL = os.environ.get("AIGAME_VLLM_GPU_UTIL", "0.65")
 
-# Zusaetzliche Flags fuer 'vllm serve', als eine Shell-Zeile.
+# Zusaetzliche Flags fuer 'vllm serve', als eine Shell-Zeile. shlex.split()
+# in _serve() zerlegt sie wie eine echte Shell (Anfuehrungszeichen bleiben
+# also erhalten - wichtig fuer das JSON in --speculative-config).
 #
-# --enable-prefix-caching ist hier der eigentliche Gewinn. Jeder Aufruf
-# besteht aus genau zwei Nachrichten: einem ueber den ganzen Lauf
-# IDENTISCHEN System-Prompt (Spielsystem + Feldbeschreibung aus
-# schema.describe) und dem Zustand des Zuges. Der erste Teil wurde bisher
-# jedes Mal komplett neu durch den Prefill geschickt.
+# Der Default ist das Durchsatz-Rezept aus der DGX-Spark-Arena
+# (spark-arena.com) fuer nvidia/Qwen3.6-35B-A3B-NVFP4 - die Kombination mit
+# der hoechsten Token-Rate auf dem GB10:
 #
-# Mit Prefix-Caching behaelt vLLM dessen KV-Cache und rechnet nur den
-# zweiten Teil. Die schema-getriebene Architektur macht das besonders
-# wirksam: da kein Chatverlauf mehr mitwaechst, ist der cachebare Anteil in
-# Szene 15 genauso gross wie in Szene 1.
+#   --kv-cache-dtype fp8            halbiert den KV-Cache
+#   --attention-backend flashinfer  schnellster Attention-Kernel auf GB10
+#   --moe-backend marlin           NVFP4-MoE ueber den Marlin-Kernel
+#   --speculative-config mtp       Multi-Token-Prediction, 3 Tokens vorab
+#   --load-format fastsafetensors  schnelleres Laden der Shards
+#   --async-scheduling             Scheduler laeuft neben der GPU-Arbeit
+#   --enable-chunked-prefill       langer Prefill in Haeppchen
+#   --max-num-seqs / --max-num-batched-tokens   Batch-Fenster
+#   --enable-prefix-caching        spart den Prefill des ueber den ganzen
+#                                  Lauf IDENTISCHEN ~6500-Token-System-
+#                                  Prompts in JEDER Runde - da kein
+#                                  Chatverlauf mitwaechst, ist der cachebare
+#                                  Anteil in Szene 15 so gross wie in Szene 1
 #
-# In neueren vLLM-Versionen ist das ohnehin Standard; das Flag doppelt zu
-# setzen schadet nicht. Sollte eine Version es NICHT kennen, weigert sich
-# 'vllm serve' zu starten - dann diese Variable auf "" setzen (siehe
-# docker-compose.yml). Der Fehler steht dank der Logdatei sofort sichtbar
-# in der Meldung, statt erst nach dem Timeout aufzufallen.
-VLLM_EXTRA_ARGS = os.environ.get("AIGAME_VLLM_ARGS", "--enable-prefix-caching")
+# --reasoning-parser gehoert NICHT hierher (dafuer AIGAME_REASONING_PARSER),
+# sonst haengt _serve() das Flag doppelt an.
+#
+# Kennt ein vLLM-Build ein Flag nicht, weigert sich 'vllm serve' zu starten
+# ("unrecognized arguments") - dann die betroffene Option streichen (in
+# docker-compose.yml AIGAME_VLLM_ARGS). Der Fehler steht dank der Logdatei
+# sofort in der Meldung, statt erst nach dem Timeout aufzufallen.
+VLLM_EXTRA_ARGS = os.environ.get(
+    "AIGAME_VLLM_ARGS",
+    "--trust-remote-code --kv-cache-dtype fp8 --attention-backend flashinfer "
+    "--moe-backend marlin --max-num-seqs 4 --max-num-batched-tokens 32768 "
+    "--enable-chunked-prefill --async-scheduling --enable-prefix-caching "
+    "--load-format fastsafetensors "
+    "--speculative-config '{\"method\":\"mtp\",\"num_speculative_tokens\":3,"
+    "\"moe_backend\":\"triton\"}'")
 
 # Name des Reasoning-Parsers von vLLM, passend zum Modell (qwen3,
 # deepseek_r1, ...). Leer lassen, wenn ohne Thinking gefahren wird.
