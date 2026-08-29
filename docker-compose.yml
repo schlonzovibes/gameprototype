@@ -39,18 +39,24 @@ services:
       # Sprach- UND Bildmodelle liegen im selben HF-Cache (/root/.cache);
       # models.py findet ihn ohne weitere Konfiguration.
 
-      # Kontextfenster. ~6500 System-Prompt + 12 Zuege Verlauf + Antwort
-      # sprengen die frueheren 24576 gegen Ende einer Geschichte.
-      AIGAME_NUM_CTX: 40960
-      # Antwortlaenge. Im Thinking-Modus muessen Denkprozess UND das
-      # vollstaendige Szenen-JSON hineinpassen - mit 2048 wurde das JSON
-      # abgeschnitten, mit 4096 riss bei qwen3-Thinking regelmaessig schon
-      # der Denkprozess allein das Budget auf, sodass fuer das JSON gar
-      # nichts mehr uebrig war (vLLM lieferte dann "no answer" - ein
-      # buchstaeblich leerer content, kein kaputtes JSON). 16384 gibt dem
-      # Denkprozess genug Luft, siehe MAX_TOKENS in llm.py fuer Details.
-      # Betrifft nur vLLM, nicht Ollama.
-      AIGAME_MAX_TOKENS: 16384
+      # Kontextfenster. Ein Aufruf ist stateless (System-Prompt + gerenderter
+      # Weltzustand, kein Chatverlauf) - real ~3-4k Tokens Prompt. 65536 ist
+      # trotzdem grosszuegig gewaehlt: mit --kv-cache-dtype fp8 ist der Platz
+      # praktisch geschenkt, die KV-Cache-Auslastung lag im Log bei <1 %.
+      AIGAME_NUM_CTX: 65536
+      # Antwortlaenge (nur vLLM). Im Thinking-Modus muessen Denkprozess UND
+      # Szenen-JSON hineinpassen. Reisst es davor ab (finish_reason=length),
+      # ist der content leer - "vLLM returned an empty response". Der Grund
+      # ist aber meist ein Denkprozess, der sich verrennt, nicht zu wenig
+      # Budget: dagegen helfen AIGAME_TEMPERATURE und der Retry in
+      # structured(), nicht ein groesseres Limit. 24576 ist die Grenze fuer
+      # einen ehrlich langen Denkprozess.
+      AIGAME_MAX_TOKENS: 24576
+      # Sampling-Temperatur fuer beide Backends. 0.9 war fuer die Erzaehlung
+      # bewusst kreativ - im Thinking-Modus aber zu hoch: der Denkprozess
+      # terminiert dann schlechter und verrennt sich bis MAX_TOKENS. 0.6 ist
+      # Qwens Empfehlung fuer den Thinking-Modus.
+      AIGAME_TEMPERATURE: "0.6"
       # Anteil des gemeinsamen Speichers fuer vLLM (Gewichte + KV-Cache).
       # 0.65 von 128 GB sind rund 83 GB (Wert aus dem Arena-Rezept); der
       # grosszuegige Rest bleibt fuers Bildmodell, das danach geladen wird.
@@ -117,6 +123,12 @@ services:
     image: ghcr.io/timothystewart6/vllm-gb10:latest
     container_name: vllm
     ipc: host
+    # PID 1 waere sonst 'sleep infinity' - und sleep erntet keine Waisen.
+    # llm.VLLM._pkill() schiesst 'vllm serve' ab, dessen EngineCore-Worker
+    # werden dann an PID 1 umgehaengt und bleiben mangels wait() fuer immer
+    # als <defunct>/Z stehen (ein Slot-Leck pro Unload). 'init: true' schiebt
+    # Dockers tini als PID 1 davor, das genau diese Waisen abraeumt.
+    init: true
     volumes:
       # gleicher Cache wie das Spiel: jedes gelistete Modell ist servierbar,
       # ohne dass vLLM es aus dem Netz zieht

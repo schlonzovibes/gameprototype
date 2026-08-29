@@ -236,6 +236,7 @@ class Game:
                  {"role": "user", "content": user}],
                 init_cls)
         except Exception as e:
+            self._log_thinking()
             raise SceneError(str(e)) from e
 
         self._log_thinking()
@@ -301,6 +302,7 @@ class Game:
                     action_block=self._resolve_block_player(player_input),
                     direction=direction)
             except Exception as e:
+                self._log_thinking()
                 raise SceneError(str(e)) from e
             if not mandatory or delta_p.characters_introduced:
                 break
@@ -338,6 +340,7 @@ class Game:
                     action_block=self._resolve_block_npc(npc, decision))
                 log += world.apply_turn(npc.id, delta_n)
             except Exception as e:
+                self._log_thinking()
                 self._log_block(f"AGENTIC {npc.id} failed - skipped", str(e))
 
         if log:
@@ -347,6 +350,7 @@ class Game:
         try:
             narrate = self._narrate(world, player_input)
         except Exception as e:
+            self._log_thinking()
             raise SceneError(str(e)) from e
         world.scene_number += 1
         # Der Client entscheidet ueber das Ende, nicht das Modell. can_end
@@ -532,8 +536,19 @@ class Game:
         self.log.flush()
 
     def _log_thinking(self) -> None:
-        if self.engine.last_thinking:
-            self._log_block("THINKING", self.engine.last_thinking.strip())
+        # THINKING steht IMMER da - eine fehlende Sektion waere sonst nicht
+        # von "Modell hat nicht gedacht" zu unterscheiden. Leer, obwohl THINK
+        # an ist, ist selbst ein Debug-Signal (Reasoning-Parser aus? Grammatik
+        # wuergt das Denken? Denkprozess ins Token-Limit gelaufen?). Wird auch
+        # im Fehlerpfad aufgerufen, damit ein verrannter Denkprozess sichtbar
+        # ist, statt mit der Exception zu verschwinden.
+        thinking = (self.engine.last_thinking or "").strip()
+        if thinking:
+            self._log_block("THINKING", thinking)
+        elif llm.THINK:
+            self._log_block("THINKING", "(leer - kein Denkprozess empfangen)")
+        else:
+            self._log_block("THINKING", "(deaktiviert - AIGAME_THINK=0)")
 
 
 def _log_path(start_prompt: str) -> Path:

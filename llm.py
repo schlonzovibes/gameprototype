@@ -49,38 +49,47 @@ from models import OLLAMA_URL, VLLM_URL, Model
 # gemessen in Tokens (grob: Wortteile). Zu klein -> das Modell vergisst den
 # Anfang der Geschichte, oder der Aufruf scheitert ganz.
 #
-# Ueberschlag, warum 40960 und nicht die frueheren 24576:
-#     ~6500   Spielprompt + Start-Prompt (der System-Prompt)
-#   ~15600   12 Zuege im Verlauf (HISTORY_TURNS), Szenen-JSON ~1300 je Zug
-#    ~4096   Platz fuer die Antwort (MAX_TOKENS)
+# Ein Aufruf ist STATELESS: genau zwei Nachrichten (System-Prompt +
+# gerenderter Weltzustand), KEIN mitwachsender Chatverlauf - die Kontinuitaet
+# traegt world.render() im User-Teil. Grobe Groesse pro Aufruf:
+#     ~2000   groesster Prompt (resolve_player.txt) + Feldbeschreibung
+#     ~1500   gerenderter Weltzustand gegen Ende einer Geschichte
+#   ~24576   Platz fuer Denkprozess + Antwort (MAX_TOKENS)
 #   -------
-#   ~26200   und damit bereits mehr, als 24576 hergaben
+#   ~28000   - also selbst mit reichlich Reserve weit unter 65536
 #
-# Bei einem quantisierten Modell (NVFP4) sind die Gewichte klein und vom
-# VLLM_GPU_UTIL-Budget bleibt reichlich fuer den KV-Cache - mehr Kontext
-# kostet dort also kaum etwas. Gilt auch fuer Ollama (num_ctx).
-NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "40960"))
+# Warum trotzdem so grosszuegig: bei NVFP4 sind die Gewichte klein und mit
+# --kv-cache-dtype fp8 kostet ein Token KV-Cache nur die Haelfte - der Platz
+# ist praktisch geschenkt (im Log lag die KV-Cache-Auslastung bei <1 %).
+# Gilt auch fuer Ollama (num_ctx).
+NUM_CTX = int(os.environ.get("AIGAME_NUM_CTX", "65536"))
 
 # Wie viele Tokens die Antwort hoechstens lang sein darf.
 #
 # Im Thinking-Modus muessen hier ZWEI Dinge hineinpassen: erst der
-# Denkprozess, dann das vollstaendige Zug-JSON. Mit den frueheren 4096 riss
-# das bei qwen3-Thinking regelmaessig VOR dem JSON ab: der Denkprozess allein
-# fraass das gesamte Budget auf, bevor </think> ueberhaupt kam. Der content
-# aus vLLM war dann buchstaeblich leer - nicht kaputtes JSON, sondern gar
-# keins, weil fuer die eigentliche Antwort kein einziges Token mehr uebrig
-# war. Genau das gab die kryptische Meldung "vLLM returned an empty
-# response" (siehe complete() unten, das den finish_reason jetzt mit in den
-# Fehlertext packt, falls es doch wieder passiert).
+# Denkprozess, dann das vollstaendige Zug-JSON. Reisst das VOR dem JSON ab
+# (finish_reason=length), war der content aus vLLM buchstaeblich leer - nicht
+# kaputtes JSON, sondern gar keins - und das Spiel meldete "vLLM returned an
+# empty response (finish_reason=length)".
 #
-# 16384 gibt dem Denkprozess ausreichend Luft. Das geht zu Lasten des
-# Kontexts (max-model-len = NUM_CTX = 40960), aber der bleibt trotzdem gross
-# genug fuer den System-Prompt und den bislang laengsten Verlauf.
+# Der haeufigere Grund dafuer ist aber KEIN zu kleines Budget, sondern ein
+# Denkprozess, der sich verrennt und im Kreis dreht, bis er das Budget - egal
+# wie gross - auffrisst. Dagegen helfen TEMPERATURE (niedriger = terminiert
+# eher) und der Wiederholungsversuch in structured(), nicht ein noch
+# groesseres MAX_TOKENS. 24576 ist die Obergrenze fuer einen EHRLICH langen
+# Denkprozess; wer es hoeher dreht, kaschiert nur eine Schleife.
 #
 # Betrifft nur vLLM: der Ollama-Payload setzt kein num_predict, dort ist die
 # Antwortlaenge ohnehin nur durch NUM_CTX begrenzt - deshalb lief genau
 # dasselbe Modell auf Ollama anstandslos und auf vLLM mit "empty response".
-MAX_TOKENS = int(os.environ.get("AIGAME_MAX_TOKENS", "16384"))
+MAX_TOKENS = int(os.environ.get("AIGAME_MAX_TOKENS", "24576"))
+
+# Sampling-Temperatur fuer BEIDE Backends. 0.9 war fuer die Erzaehlung bewusst
+# kreativ gewaehlt - im Thinking-Modus ist das aber zu hoch: der Denkprozess
+# findet dann schwerer zu einem Schluss und verrennt sich, bis MAX_TOKENS
+# reisst (siehe oben). 0.6 ist Qwens eigene Empfehlung fuer den Thinking-Modus
+# und laesst die Erzaehlung immer noch lebendig genug.
+TEMPERATURE = float(os.environ.get("AIGAME_TEMPERATURE", "0.6"))
 
 # Reasoning-Modus: manche Modelle koennen vor der Antwort "nachdenken".
 # Das kostet Zeit, verbessert aber oft die Konsistenz. Der Denktext landet
@@ -194,6 +203,14 @@ _VLLM_ANY = "-i 'vll[m]'"
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 
+class EmptyResponse(RuntimeError):
+    """Das Backend lieferte einen leeren content - meist ein Denkprozess,
+    der sich verrannt und das Token-Budget aufgefressen hat, bevor das JSON
+    kam. Eigene Klasse, damit structured() das von einem Schema-Fehler
+    unterscheiden und einmal - mit einer Ermahnung zur Kuerze - wiederholen
+    kann, statt hart abzubrechen."""
+
+
 class LLM:
     """Basisklasse: was jedes Sprachmodell-Backend koennen muss.
 
@@ -262,7 +279,24 @@ class LLM:
         attempt = list(messages)
 
         for remaining in range(retries, -1, -1):
-            raw = self.complete(attempt, schema)
+            try:
+                raw = self.complete(attempt, schema)
+            except EmptyResponse as e:
+                # Leerer content - fast immer ein Denkprozess, der sich
+                # verrannt hat. Ein blosses Wiederholen liefe genauso; wir
+                # haengen deshalb eine ausdrueckliche Ermahnung zur Kuerze an
+                # und lassen die naechste Runde damit laufen.
+                if remaining == 0:
+                    raise RuntimeError(
+                        f"Model gave an empty answer after "
+                        f"{retries + 1} attempts ({e}).") from None
+                attempt = attempt + [
+                    {"role": "user",
+                     "content": "Your previous reply was empty - the "
+                                "reasoning ran too long. Think briefly, then "
+                                "output only the JSON object now."},
+                ]
+                continue
             try:
                 return model_cls.model_validate_json(_json_slice(raw))
             except ValidationError as e:
@@ -293,25 +327,44 @@ class LLM:
         return True
 
     def _split_thinking(self, content: str) -> str:
-        """<think>...</think> aus dem Content loesen.
+        """Den Denkprozess aus dem Content loesen.
 
-        Denkmodelle schreiben ihren Denkprozess mitten in die Antwort. Das
-        muss raus, sonst ist das JSON kaputt. Der Text wandert stattdessen
-        nach self.last_thinking und von dort ins Debug-Log.
+        Mit --reasoning-parser trennt vLLM das Denken schon serverseitig ab
+        (reasoning_content) und content ist blankes JSON - dann tut diese
+        Methode nichts. Die drei Faelle hier sind die Rueckfallebene fuer den
+        Fall, dass doch ein <think> in den content durchsickert: bei Ollama,
+        bei einem Parser-Aussetzer oder wenn der Denkprozess ins Token-Limit
+        lief. Der Text wandert nach self.last_thinking und von dort ins Log.
         """
+        # Fall 1: vollstaendiger Block <think>...</think>.
         match = _THINK_RE.search(content)
-        if not match:
-            return content     # nichts gefunden - unveraendert zurueck
+        if match:
+            block = match.group(1).strip()   # Gruppe 1 = das (.*?) im Muster
+            # An vorhandenen Denktext anhaengen (manche Backends liefern
+            # beides: ein eigenes Feld UND einen Inline-Block). strip() raeumt
+            # danach den fuehrenden Umbruch weg, falls last_thinking leer war.
+            self.last_thinking = f"{self.last_thinking}\n{block}".strip()
+            # sub() ersetzt das Gefundene durch "" - count=1 nur das erste Mal.
+            return _THINK_RE.sub("", content, count=1).strip()
 
-        block = match.group(1).strip()   # Gruppe 1 = das (.*?) im Muster
+        # Fall 2: nur ein schliessendes </think>, kein oeffnendes. Qwens
+        # Chat-Vorlage legt das oeffnende <think> schon in den Prompt - im
+        # generierten Text steht dann alles VOR dem ersten </think> als
+        # Denkprozess, ohne Tag davor.
+        head, sep, rest = content.partition("</think>")
+        if sep:
+            self.last_thinking = f"{self.last_thinking}\n{head.strip()}".strip()
+            return rest.strip()
 
-        # An vorhandenen Denktext anhaengen (manche Backends liefern beides:
-        # ein eigenes Feld UND einen Inline-Block). strip() raeumt danach den
-        # fuehrenden Umbruch weg, falls last_thinking vorher leer war.
-        self.last_thinking = f"{self.last_thinking}\n{block}".strip()
+        # Fall 3: ein oeffnendes <think> ohne Abschluss - der Denkprozess lief
+        # ins Token-Limit, das JSON kam nie. Alles ist Denktext; "" macht
+        # daraus in complete() eine saubere EmptyResponse zum Wiederholen,
+        # statt den halben Gedankengang als Szene anzuzeigen.
+        if content.lstrip().startswith("<think>"):
+            self.last_thinking = f"{self.last_thinking}\n{content}".strip()
+            return ""
 
-        # sub() ersetzt das Gefundene durch "" - count=1 nur das erste Mal.
-        return _THINK_RE.sub("", content, count=1).strip()
+        return content     # nichts gefunden - unveraendert zurueck
 
 
 class Ollama(LLM):
@@ -372,9 +425,7 @@ class Ollama(LLM):
             # blossen "json", damit ein Aufruf ohne Modellklasse weiterhin
             # brauchbar antwortet.
             "format": schema if schema else "json",
-            "options": {"temperature": 0.9, "num_ctx": NUM_CTX},
-            # temperature 0.9 = recht kreativ. Niedriger waere braver und
-            # vorhersehbarer - fuer eine generative Geschichte ungeeignet.
+            "options": {"temperature": TEMPERATURE, "num_ctx": NUM_CTX},
         }
         if THINK:
             payload["think"] = True
@@ -402,8 +453,8 @@ class Ollama(LLM):
         content = self._split_thinking(message.get("content", "").strip())
 
         if not content:
-            raise RuntimeError(f"Ollama lieferte eine leere Antwort von "
-                               f"{self.name} (num_ctx={NUM_CTX}).")
+            raise EmptyResponse(f"Ollama lieferte eine leere Antwort von "
+                                f"{self.name} (num_ctx={NUM_CTX}).")
         return content
 
     def _post(self, path: str, payload: dict) -> dict:
@@ -672,7 +723,12 @@ class VLLM(LLM):
         payload = {
             "model": self.name,
             "messages": messages,
-            "temperature": 0.9,
+            "temperature": TEMPERATURE,
+            # top_p 0.95 ist der zweite Teil von Qwens Sampling-Empfehlung
+            # fuer den Thinking-Modus - schneidet den langen Rattenschwanz
+            # unwahrscheinlicher Tokens ab, an dem sich der Denkprozess sonst
+            # gern verheddert.
+            "top_p": 0.95,
             "max_tokens": MAX_TOKENS,
         }
         if schema:
@@ -697,20 +753,22 @@ class VLLM(LLM):
         # ein lauter Fehler ehrlicher ist als ein stiller Ersatzwert.
         choice = data["choices"][0]
         message = choice["message"]
-        self.last_thinking = message.get("reasoning_content") or ""
+        # Das abgetrennte Denken steht je nach vLLM-Version/Parser in
+        # "reasoning_content" (DeepSeek-Konvention) ODER "reasoning" (0.27er-
+        # Build mit --reasoning-parser qwen3). Beide pruefen, sonst faellt der
+        # Denktext still unter den Tisch und das [THINKING]-Log bleibt leer.
+        self.last_thinking = (message.get("reasoning_content")
+                              or message.get("reasoning") or "")
         content = self._split_thinking((message.get("content") or "").strip())
 
         if not content:
             # finish_reason mit in die Meldung: "length" heisst, MAX_TOKENS
-            # wurde erreicht, bevor ueberhaupt etwas ausserhalb von
-            # reasoning_content stand (typischerweise, weil der Denkprozess
-            # allein das ganze Budget verbraucht hat - siehe MAX_TOKENS oben).
-            # Ohne diesen Hinweis sieht ein leeres "content" bei einem
-            # Denkprozess, der das Budget sprengt, genauso aus wie jeder
-            # andere Grund fuer eine leere Antwort - man rät dann im Dunkeln
-            # statt die Ursache am finish_reason abzulesen.
+            # wurde erreicht, bevor etwas ausserhalb von reasoning_content
+            # stand - der Denkprozess hat sich also verrannt. structured()
+            # faengt EmptyResponse und wiederholt einmal mit einer Ermahnung
+            # zur Kuerze; last_thinking traegt den Rattenschwanz fuers Log.
             reason = choice.get("finish_reason", "unknown")
-            raise RuntimeError(
+            raise EmptyResponse(
                 f"vLLM returned an empty response from {self.name} "
                 f"(finish_reason={reason}).")
         return content
