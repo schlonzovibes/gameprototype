@@ -8,10 +8,17 @@ import typing
 import unittest
 from pathlib import Path
 
+import llm
 import story
 from state import Character, Exit, Node, World
 
 SYSTEM_DIR = Path(__file__).resolve().parent.parent / "game_prompts" / "default"
+
+
+def _reply(value):
+    """FakeEngine-Antworten tragen jetzt die Reply-Huelle wie das echte
+    llm.LLM.structured() - value plus (hier leere) Metadaten."""
+    return llm.Reply(value=value, thinking="", tokens_per_sec=None)
 
 
 def _fill(model_cls, overrides=None):
@@ -53,7 +60,6 @@ class FakeEngine:
     gescheiterten Modellaufruf)."""
 
     def __init__(self, fail_on: set[str] = frozenset()):
-        self.last_thinking = ""
         self.fail_on = set(fail_on)
         self.calls: list[str] = []   # model_cls.__name__ je Aufruf
 
@@ -62,8 +68,9 @@ class FakeEngine:
         user = messages[1]["content"]
         for marker in self.fail_on:
             if marker in user:
-                raise RuntimeError(f"forced failure for test (marker: {marker!r})")
-        return _fill(model_cls)
+                raise llm.StructuredError(
+                    f"forced failure for test (marker: {marker!r})")
+        return _reply(_fill(model_cls))
 
 
 def _world_with_agentic() -> World:
@@ -206,8 +213,8 @@ class QuotaNotbremseTest(GameTestCase):
                     NC = model_cls.model_fields["characters_introduced"].annotation.__args__[0]
                     one = _fill(NC, {"name": "Sailor", "at": "n1",
                                      "agenda_draft": "x", "agenda_target_hint": "x"})
-                    return _fill(model_cls, {"characters_introduced": [one]})
-                return _fill(model_cls)
+                    return _reply(_fill(model_cls, {"characters_introduced": [one]}))
+                return _reply(_fill(model_cls))
 
         engine = OneCharacterEngine()
         game = self._game(engine)

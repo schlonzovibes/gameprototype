@@ -240,15 +240,16 @@ class Game:
         self._log_block("INIT / user", user)
 
         try:
-            init = self.engine.structured(
+            reply = self.engine.structured(
                 [{"role": "system", "content": system},
                  {"role": "user", "content": user}],
                 init_cls)
         except Exception as e:
-            self._log_thinking()
+            self._log_thinking(getattr(e, "thinking", ""))
             raise SceneError(str(e)) from e
 
-        self._log_thinking()
+        init = reply.value
+        self._log_thinking(reply.thinking)
         self._log_block("INIT / result", init.model_dump_json(indent=2))
 
         narration, image_prompt = schema.opening_text(init)
@@ -313,7 +314,7 @@ class Game:
                     action_block=self._resolve_block_player(player_input),
                     direction=direction)
             except Exception as e:
-                self._log_thinking()
+                self._log_thinking(getattr(e, "thinking", ""))
                 raise SceneError(str(e)) from e
             if not mandatory or delta_p.characters_introduced:
                 break
@@ -351,7 +352,7 @@ class Game:
                     action_block=self._resolve_block_npc(npc, decision))
                 log += world.apply_turn(npc.id, delta_n)
             except Exception as e:
-                self._log_thinking()
+                self._log_thinking(getattr(e, "thinking", ""))
                 self._log_block(f"AGENTIC {npc.id} failed - skipped", str(e))
 
         if log:
@@ -361,7 +362,7 @@ class Game:
         try:
             narrate = self._narrate(world, player_input)
         except Exception as e:
-            self._log_thinking()
+            self._log_thinking(getattr(e, "thinking", ""))
             raise SceneError(str(e)) from e
         world.scene_number += 1
         # Der Client entscheidet ueber das Ende, nicht das Modell. can_end
@@ -431,15 +432,15 @@ class Game:
             self._log_block(f"RESOLVE {actor_id} / story direction", direction)
         self._log_block(f"RESOLVE {actor_id} / user", user)
 
-        result = self.engine.structured(
+        reply = self.engine.structured(
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
             resolve_cls)
 
-        self._log_thinking()
+        self._log_thinking(reply.thinking)
         self._log_block(f"RESOLVE {actor_id} / result",
-                        result.model_dump_json(indent=2))
-        return result
+                        reply.value.model_dump_json(indent=2))
+        return reply.value
 
     def _resolve_block_player(self, player_input: str) -> str:
         return f"ACTING: the player\nPLAYER ACTION:\n{player_input}\n"
@@ -468,15 +469,15 @@ class Game:
 
         self._log_block(f"DECIDE / {npc.id} context", user)
 
-        result = self.engine.structured(
+        reply = self.engine.structured(
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
             decide_cls)
 
-        self._log_thinking()
+        self._log_thinking(reply.thinking)
         self._log_block(f"DECIDE / {npc.id} result",
-                        result.model_dump_json(indent=2))
-        return result
+                        reply.value.model_dump_json(indent=2))
+        return reply.value
 
     def _narrate(self, world: World, player_input: str):
         """Aus den fuer den Spieler SICHTBAREN Ereignissen dieser Runde eine
@@ -503,14 +504,14 @@ class Game:
 
         self._log_block("NARRATE / user", user)
 
-        result = self.engine.structured(
+        reply = self.engine.structured(
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
             narrate_cls)
 
-        self._log_thinking()
-        self._log_block("NARRATE / result", result.model_dump_json(indent=2))
-        return result
+        self._log_thinking(reply.thinking)
+        self._log_block("NARRATE / result", reply.value.model_dump_json(indent=2))
+        return reply.value
 
     def _check_narration_leak(self, narration: str, world: World) -> None:
         """Ist das verborgene gemeinsame Ziel der agentischen Figur woertlich
@@ -572,14 +573,16 @@ class Game:
         self.json_log.write("\n\n")
         self.json_log.flush()
 
-    def _log_thinking(self) -> None:
+    def _log_thinking(self, thinking: str) -> None:
         # THINKING steht IMMER da - eine fehlende Sektion waere sonst nicht
         # von "Modell hat nicht gedacht" zu unterscheiden. Leer, obwohl THINK
         # an ist, ist selbst ein Debug-Signal (Reasoning-Parser aus? Grammatik
         # wuergt das Denken? Denkprozess ins Token-Limit gelaufen?). Wird auch
-        # im Fehlerpfad aufgerufen, damit ein verrannter Denkprozess sichtbar
-        # ist, statt mit der Exception zu verschwinden.
-        thinking = (self.engine.last_thinking or "").strip()
+        # im Fehlerpfad aufgerufen (mit getattr(e, "thinking", "")), damit ein
+        # verrannter Denkprozess sichtbar ist, statt mit der Exception zu
+        # verschwinden. thinking kommt jetzt aus dem Reply bzw. der Exception,
+        # nicht mehr aus einem Engine-Attribut - das vertraegt parallele Calls.
+        thinking = (thinking or "").strip()
         if thinking:
             self._log_block("THINKING", thinking)
         elif llm.THINK:

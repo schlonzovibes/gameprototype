@@ -42,8 +42,12 @@ import shlex             # Argumente sicher fuer eine Shell-Zeile quoten
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from typing import Generic, TypeVar
 
 from models import OLLAMA_URL, VLLM_URL, Model
+
+_T = TypeVar("_T")
 
 # Kontextfenster = wie viel Text das Modell gleichzeitig "sehen" kann,
 # gemessen in Tokens (grob: Wortteile). Zu klein -> das Modell vergisst den
@@ -106,18 +110,28 @@ PRESENCE_PENALTY = float(os.environ.get("AIGAME_PRESENCE_PENALTY", "1.5"))
 # ueber options entgegen, aber der Fehlerfall lag ausschliesslich bei vLLM.
 TOP_K = int(os.environ.get("AIGAME_TOP_K", "20"))
 
-# Zuletzt gemessene Generierungsrate (Tokens/Sekunde) der juengsten
-# complete()-Anfrage - nur fuer die Footer-Anzeige (ui.py liest das). None =
-# es lief noch keine Inferenz. structured() ruft complete() ggf. mehrfach
-# auf; jeder Aufruf ueberschreibt, der Footer zeigt also stets die letzte.
+# Zuletzt gemessene Generierungsrate (Tokens/Sekunde) - nur fuer die
+# Footer-Anzeige (ui.py liest das). None = es lief noch keine Inferenz.
+# structured() schreibt den Wert nach jedem erfolgreichen complete() aus dem
+# Reply, das es gleich zurueckgibt. Laufen mehrere structured()-Aufrufe
+# parallel (agentische DECIDE-Faecherung, siehe story.py), gewinnt der zuletzt
+# fertige - racy, aber rein kosmetisch.
 last_tokens_per_sec: float | None = None
 
 
-def _record_rate(tokens: int | None, seconds: float | None) -> None:
-    """Rate ablegen, wenn beide Werte brauchbar sind - sonst unveraendert."""
-    global last_tokens_per_sec
+def _rate(tokens: int | None, seconds: float | None) -> float | None:
+    """tok/s aus Tokenzahl und Dauer - None, wenn eins davon unbrauchbar ist.
+    Rein, ohne Seiteneffekt (der globale Schreibzugriff sitzt in structured)."""
     if tokens and seconds and seconds > 0:
-        last_tokens_per_sec = tokens / seconds
+        return tokens / seconds
+    return None
+
+
+def _record_rate(rate: float | None) -> None:
+    """Die zuletzt gemessene Rate fuer den Footer ablegen."""
+    global last_tokens_per_sec
+    if rate is not None:
+        last_tokens_per_sec = rate
 
 
 # Reasoning-Modus: manche Modelle koennen vor der Antwort "nachdenken".
@@ -237,7 +251,45 @@ class EmptyResponse(RuntimeError):
     der sich verrannt und das Token-Budget aufgefressen hat, bevor das JSON
     kam. Eigene Klasse, damit structured() das von einem Schema-Fehler
     unterscheiden und einmal - mit einer Ermahnung zur Kuerze - wiederholen
-    kann, statt hart abzubrechen."""
+    kann, statt hart abzubrechen.
+
+    thinking traegt den Rattenschwanz-Denkprozess mit: complete() setzt kein
+    Instanz-Attribut mehr (parallelfest, siehe Reply), also muss der Denktext
+    hier heraus, damit story._log_thinking() ihn im Fehlerpfad noch loggen
+    kann - genau da ist er am interessantesten."""
+
+    def __init__(self, message: str, thinking: str = ""):
+        super().__init__(message)
+        self.thinking = thinking
+
+
+class StructuredError(RuntimeError):
+    """structured() hat nach allen Versuchen aufgegeben (leere Antwort oder
+    Schema-Verstoss). Traegt wie EmptyResponse den letzten Denkprozess mit,
+    damit der Aufrufer ihn ins Log schreiben kann."""
+
+    def __init__(self, message: str, thinking: str = ""):
+        super().__init__(message)
+        self.thinking = thinking
+
+
+@dataclass
+class Reply(Generic[_T]):
+    """Was structured() zurueckgibt: das validierte Modell PLUS die Metadaten
+    des Aufrufs, die frueher am Engine-Objekt hingen (self.last_thinking) bzw.
+    als Modulglobale gesetzt wurden.
+
+    Als Rueckgabewert statt als geteilter Zustand, weil mehrere
+    structured()-Aufrufe gleichzeitig laufen koennen (agentische
+    DECIDE-Faecherung): am Objekt wuerden sie sich gegenseitig ueberschreiben,
+    und story._log_thinking() ordnete den Denk-Trace dem falschen Call zu.
+
+    Generisch ueber _T, damit reply.value den konkreten Modelltyp behaelt
+    (structured(x, Foo) -> Reply[Foo]).
+    """
+    value: _T                           # die geparste Pydantic-Instanz
+    thinking: str = ""                   # Reasoning-Text dieses Aufrufs
+    tokens_per_sec: float | None = None  # gemessene Generierungsrate
 
 
 class LLM:
@@ -248,11 +300,9 @@ class LLM:
     selbst ausfuellen - der Rest gilt fuer beide gleichermassen.
 
     Der Sinn: story.py muss nicht wissen, welches Backend laeuft. Es ruft
-    .structured() auf und bekommt ein validiertes Objekt - egal ob dahinter
-    Ollama oder vLLM steckt.
+    .structured() auf und bekommt ein Reply (validiertes Objekt + Metadaten)
+    zurueck - egal ob dahinter Ollama oder vLLM steckt.
     """
-
-    last_thinking: str = ""   # Reasoning-Text des letzten complete()-Aufrufs
 
     def load(self, progress=None) -> None:  # pragma: no cover
         """Modell bereitstellen.
@@ -265,7 +315,7 @@ class LLM:
         raise NotImplementedError
 
     def complete(self, messages: list[dict],
-                 schema: dict | None = None) -> str:  # pragma: no cover
+                 schema: dict | None = None) -> tuple[str, str, float | None]:  # pragma: no cover
         """Muss jede Unterklasse selbst implementieren.
 
         schema ist ein JSON-Schema. Ist es gesetzt, wird die Antwort nicht
@@ -278,17 +328,28 @@ class LLM:
         und stoert den Prefix-Cache nicht - der System-Prompt bleibt
         byteweise identisch, egal welches Schema gerade gilt.
 
+        Rueckgabe: (content, thinking, tokens_per_sec). content ist der
+        JSON-Text, thinking der abgetrennte Denkprozess (leer, wenn keiner
+        kam), tokens_per_sec die gemessene Generierungsrate oder None. Als
+        Tupel statt als Instanz-Attribut, damit parallele Aufrufe sich nicht
+        gegenseitig ueberschreiben (siehe Reply).
+
         NotImplementedError ist das uebliche Signal fuer "hier fehlt noch
         etwas" - wer von LLM erbt und das vergisst, merkt es sofort.
         """
         raise NotImplementedError
 
-    def structured(self, messages: list[dict], model_cls, retries: int = 1):
-        """Fragen und ein VALIDIERTES Pydantic-Objekt zurueckbekommen.
+    def structured(self, messages: list[dict], model_cls: type[_T],
+                   retries: int = 1) -> Reply[_T]:
+        """Fragen und ein Reply (validiertes Objekt + Metadaten) zurueckbekommen.
 
         Der einzige Weg, auf dem story.py mit einem Modell spricht. Was hier
         herauskommt, hat Grammatik und Validierung passiert - der Aufrufer
-        muss nichts mehr pruefen und nichts mehr retten.
+        muss nichts mehr pruefen und nichts mehr retten. reply.value ist das
+        Modell, reply.thinking der Denkprozess dieses Aufrufs, reply.tokens_
+        per_sec die Rate. Alles als Rueckgabe statt als geteilter Zustand -
+        story.py faechert die agentischen DECIDE-Aufrufe parallel, an einem
+        Instanz-Attribut wuerden sie sich gegenseitig ueberschreiben.
 
         Warum trotz Grammatik noch ein Reparaturversuch? Weil nicht jedes
         Backend sie beherrscht: ein aelteres Ollama ignoriert das Schema und
@@ -304,21 +365,25 @@ class LLM:
         # dort geladen, wo nur die Modellverwaltung gebraucht wird.
         from pydantic import ValidationError
 
-        schema = model_cls.model_json_schema()
+        schema = model_cls.model_json_schema()  # type: ignore[attr-defined]
         attempt = list(messages)
+        thinking = ""   # ueber die Versuche mitgezogen, damit der Denk-Trace
+                        # eines verrannten ersten Versuchs im Fehlerpfad nicht
+                        # verlorengeht
 
         for remaining in range(retries, -1, -1):
             try:
-                raw = self.complete(attempt, schema)
+                raw, thinking, rate = self.complete(attempt, schema)
             except EmptyResponse as e:
                 # Leerer content - fast immer ein Denkprozess, der sich
                 # verrannt hat. Ein blosses Wiederholen liefe genauso; wir
                 # haengen deshalb eine ausdrueckliche Ermahnung zur Kuerze an
                 # und lassen die naechste Runde damit laufen.
+                thinking = e.thinking or thinking
                 if remaining == 0:
-                    raise RuntimeError(
+                    raise StructuredError(
                         f"Model gave an empty answer after "
-                        f"{retries + 1} attempts ({e}).") from None
+                        f"{retries + 1} attempts ({e}).", thinking) from None
                 attempt = attempt + [
                     {"role": "user",
                      "content": "Your previous reply was empty - the "
@@ -327,12 +392,13 @@ class LLM:
                 ]
                 continue
             try:
-                return model_cls.model_validate_json(_json_slice(raw))
+                value = model_cls.model_validate_json(  # type: ignore[attr-defined]
+                    _json_slice(raw))
             except ValidationError as e:
                 if remaining == 0:
-                    raise RuntimeError(
+                    raise StructuredError(
                         f"Model output did not match the schema after "
-                        f"{retries + 1} attempts:\n{e}") from None
+                        f"{retries + 1} attempts:\n{e}", thinking) from None
                 attempt = attempt + [
                     {"role": "assistant", "content": raw},
                     {"role": "user",
@@ -340,6 +406,15 @@ class LLM:
                                 f"validator:\n{e}\n\nAnswer again. Return "
                                 "only the corrected object."},
                 ]
+                continue
+
+            _record_rate(rate)   # Modulglobale fuer den Footer (ui.py)
+            return Reply(value=value, thinking=thinking, tokens_per_sec=rate)
+
+        # Unerreichbar: die Schleife enthaelt immer remaining==0, und dieser
+        # Durchgang raist. Steht hier nur, damit der Typpruefer den
+        # Reply-Rueckgabetyp als garantiert ansieht.
+        raise StructuredError("structured() exhausted every attempt", thinking)
 
     def unload(self) -> bool:
         """Modell wieder freigeben, falls das Backend das braucht.
@@ -355,26 +430,27 @@ class LLM:
         """
         return True
 
-    def _split_thinking(self, content: str) -> str:
-        """Den Denkprozess aus dem Content loesen.
+    def _split_thinking(self, content: str, prior: str = "") -> tuple[str, str]:
+        """Den Denkprozess aus dem Content loesen. Rueckgabe: (clean, thinking).
 
-        Mit --reasoning-parser trennt vLLM das Denken schon serverseitig ab
-        (reasoning_content) und content ist blankes JSON - dann tut diese
-        Methode nichts. Die drei Faelle hier sind die Rueckfallebene fuer den
-        Fall, dass doch ein <think> in den content durchsickert: bei Ollama,
-        bei einem Parser-Aussetzer oder wenn der Denkprozess ins Token-Limit
-        lief. Der Text wandert nach self.last_thinking und von dort ins Log.
+        prior ist der schon serverseitig abgetrennte Denktext (vLLMs
+        reasoning_content bzw. Ollamas thinking-Feld) - an ihn wird ein
+        eventueller Inline-Block angehaengt. Rein, ohne Seiteneffekt: der
+        Aufrufer reicht das Ergebnis als Teil des complete()-Tupels weiter.
+
+        Mit --reasoning-parser ist content blankes JSON und prior traegt
+        alles - dann greift Fall 4. Die ersten drei Faelle sind die
+        Rueckfallebene, falls doch ein <think> in den content durchsickert:
+        bei Ollama, bei einem Parser-Aussetzer oder wenn der Denkprozess ins
+        Token-Limit lief.
         """
         # Fall 1: vollstaendiger Block <think>...</think>.
         match = _THINK_RE.search(content)
         if match:
             block = match.group(1).strip()   # Gruppe 1 = das (.*?) im Muster
-            # An vorhandenen Denktext anhaengen (manche Backends liefern
-            # beides: ein eigenes Feld UND einen Inline-Block). strip() raeumt
-            # danach den fuehrenden Umbruch weg, falls last_thinking leer war.
-            self.last_thinking = f"{self.last_thinking}\n{block}".strip()
+            thinking = f"{prior}\n{block}".strip()
             # sub() ersetzt das Gefundene durch "" - count=1 nur das erste Mal.
-            return _THINK_RE.sub("", content, count=1).strip()
+            return _THINK_RE.sub("", content, count=1).strip(), thinking
 
         # Fall 2: nur ein schliessendes </think>, kein oeffnendes. Qwens
         # Chat-Vorlage legt das oeffnende <think> schon in den Prompt - im
@@ -382,18 +458,18 @@ class LLM:
         # Denkprozess, ohne Tag davor.
         head, sep, rest = content.partition("</think>")
         if sep:
-            self.last_thinking = f"{self.last_thinking}\n{head.strip()}".strip()
-            return rest.strip()
+            return rest.strip(), f"{prior}\n{head.strip()}".strip()
 
         # Fall 3: ein oeffnendes <think> ohne Abschluss - der Denkprozess lief
         # ins Token-Limit, das JSON kam nie. Alles ist Denktext; "" macht
         # daraus in complete() eine saubere EmptyResponse zum Wiederholen,
         # statt den halben Gedankengang als Szene anzuzeigen.
         if content.lstrip().startswith("<think>"):
-            self.last_thinking = f"{self.last_thinking}\n{content}".strip()
-            return ""
+            return "", f"{prior}\n{content}".strip()
 
-        return content     # nichts gefunden - unveraendert zurueck
+        # Fall 4: nichts im content - content unveraendert, prior ist der
+        # ganze Denktext (Normalfall mit --reasoning-parser).
+        return content, prior
 
 
 class Ollama(LLM):
@@ -405,7 +481,6 @@ class Ollama(LLM):
 
     def __init__(self, model: Model):
         self.name = model.ref        # z.B. "qwen3:32b"
-        self.last_thinking = ""
 
     def load(self, progress=None) -> None:
         """Modell in den Speicher ziehen, ohne Text zu erzeugen.
@@ -440,8 +515,9 @@ class Ollama(LLM):
             return False
 
     def complete(self, messages: list[dict],
-                 schema: dict | None = None) -> str:
-        """Den Verlauf schicken und die Antwort als Text zurueckbekommen."""
+                 schema: dict | None = None) -> tuple[str, str, float | None]:
+        """Den Verlauf schicken und (content, thinking, tokens_per_sec)
+        zurueckbekommen."""
         # Ein dict ist Pythons Woerterbuch: Schluessel -> Wert. Das hier wird
         # gleich zu JSON und geht so an den Server.
         payload = {
@@ -481,16 +557,18 @@ class Ollama(LLM):
         # (reine Generierung, ohne Prompt-Verarbeitung) - genauer als eine
         # eigene Wall-Clock-Messung.
         dur = data.get("eval_duration")
-        _record_rate(data.get("eval_count"), dur / 1e9 if dur else None)
+        rate = _rate(data.get("eval_count"), dur / 1e9 if dur else None)
 
         message = data.get("message", {})
-        self.last_thinking = message.get("thinking") or ""
-        content = self._split_thinking(message.get("content", "").strip())
+        content, thinking = self._split_thinking(
+            (message.get("content") or "").strip(),
+            prior=message.get("thinking") or "")
 
         if not content:
-            raise EmptyResponse(f"Ollama lieferte eine leere Antwort von "
-                                f"{self.name} (num_ctx={NUM_CTX}).")
-        return content
+            raise EmptyResponse(
+                f"Ollama lieferte eine leere Antwort von "
+                f"{self.name} (num_ctx={NUM_CTX}).", thinking)
+        return content, thinking, rate
 
     def _post(self, path: str, payload: dict) -> dict:
         try:
@@ -528,7 +606,7 @@ class VLLM(LLM):
 
     def __init__(self, model: Model):
         self.name = model.ref     # HF-Repo-ID; muss dem Namen entsprechen,
-        self.last_thinking = ""   # den vLLM spaeter serviert
+                                  # den vLLM spaeter serviert
 
     # ------------------------------------------------------------ Laden
 
@@ -754,7 +832,7 @@ class VLLM(LLM):
     # ----------------------------------------------------------- Abfragen
 
     def complete(self, messages: list[dict],
-                 schema: dict | None = None) -> str:
+                 schema: dict | None = None) -> tuple[str, str, float | None]:
         payload = {
             "model": self.name,
             "messages": messages,
@@ -792,7 +870,7 @@ class VLLM(LLM):
         # vLLM liefert keine Timing-Felder - Wall-Clock ist die einzige Quelle.
         # completion_tokens zaehlt auch die Reasoning-Tokens mit; als grober
         # Durchsatzwert fuer die Fussleiste ist das genau richtig.
-        _record_rate((data.get("usage") or {}).get("completion_tokens"),
+        rate = _rate((data.get("usage") or {}).get("completion_tokens"),
                      time.perf_counter() - t0)
 
         # Hier ohne .get(): fehlt "choices", ist die Antwort so kaputt, dass
@@ -803,21 +881,22 @@ class VLLM(LLM):
         # "reasoning_content" (DeepSeek-Konvention) ODER "reasoning" (0.27er-
         # Build mit --reasoning-parser qwen3). Beide pruefen, sonst faellt der
         # Denktext still unter den Tisch und das [THINKING]-Log bleibt leer.
-        self.last_thinking = (message.get("reasoning_content")
-                              or message.get("reasoning") or "")
-        content = self._split_thinking((message.get("content") or "").strip())
+        reasoning = (message.get("reasoning_content")
+                     or message.get("reasoning") or "")
+        content, thinking = self._split_thinking(
+            (message.get("content") or "").strip(), prior=reasoning)
 
         if not content:
             # finish_reason mit in die Meldung: "length" heisst, MAX_TOKENS
             # wurde erreicht, bevor etwas ausserhalb von reasoning_content
             # stand - der Denkprozess hat sich also verrannt. structured()
             # faengt EmptyResponse und wiederholt einmal mit einer Ermahnung
-            # zur Kuerze; last_thinking traegt den Rattenschwanz fuers Log.
+            # zur Kuerze; thinking traegt den Rattenschwanz fuers Log.
             reason = choice.get("finish_reason", "unknown")
             raise EmptyResponse(
                 f"vLLM returned an empty response from {self.name} "
-                f"(finish_reason={reason}).")
-        return content
+                f"(finish_reason={reason}).", thinking)
+        return content, thinking, rate
 
 
 # vLLM zeigt das Laden der Gewichte als tqdm-Balken:
