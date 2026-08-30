@@ -574,7 +574,13 @@ class Game:
         system = self._system(self.prompts["narrate.txt"], narrate_cls)
 
         visible_events = state.visible(world.round_log)
-        lines = [f"YOUR PLACE:\n{world.render_player_place()}", ""]
+        # Die Sprache explizit in den Kontext: der uebrige Block (Anchor,
+        # Events, Marks) ist englisches Arbeitsmaterial, und ein NARRATE ohne
+        # Denkprozess (AIGAME_THINK_CALLS) wuerde sich sonst daran ausrichten
+        # statt an der Spielsprache.
+        lines = [f"GAME LANGUAGE: {world.language} - write the narrator text "
+                 f"in this language, nothing else.", "",
+                 f"YOUR PLACE:\n{world.render_player_place()}", ""]
         if visible_events:
             lines.append("WHAT HAPPENED HERE THIS ROUND:")
             lines.extend(f"  {e.clause}" for e in visible_events)

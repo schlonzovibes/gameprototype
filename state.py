@@ -445,6 +445,10 @@ class World:
             f"YOU ARE {char.id} {char.name}",
             f"YOUR AGENDA: {char.agenda}",
             f"YOUR CURRENT AIM: {char.aim or '(not yet set - decide one now)'}",
+            # Explizit, weil der Rest des Blocks englisches Arbeitsmaterial ist
+            # und ein DECIDE ohne Denkprozess sonst die utterance auf Englisch
+            # setzt statt in der Spielsprache.
+            f"LANGUAGE: say your lines (utterance) in {self.language}",
         ]
         if char.is_agentic and char.hidden_target:
             lines.append(f"YOUR HIDDEN AIM RELATES TO: {char.hidden_target}")
