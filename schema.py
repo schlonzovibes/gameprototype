@@ -56,21 +56,23 @@ STRICT = {"extra": "forbid"}
 # ------------------------------------------------------- statisch: INIT
 
 def init_model() -> type[BaseModel]:
-    """Der einmalige Weltaufbau - EIN Raum und 0-2 Figuren darin.
+    """Der einmalige Weltaufbau - die lokale Nachbarschaft und 0-2 Figuren darin.
 
     Frueher erzeugte INIT einen vollstaendigen Graphen (7-9 Knoten) samt
     Charakteren VOR dem ersten Spielzug - eine im Voraus geplante
     Levelgeometrie, die ein Sprachmodell danach nur noch abschreitet.
     Playtesting zeigte: entweder haelt sich das Modell daran (dann war das
     Sprachmodell fuer die Navigation ueberfluessig), oder es weicht ab (dann
-    war der Graph verschwendete Arbeit). Deshalb baut INIT keinen Graphen
-    mehr - jeder weitere Knoten entsteht als Nebenprodukt von
-    resolve_model()s new_room-Feld, sobald die Erzaehlung ihn braucht.
+    war der Graph verschwendete Arbeit). Deshalb baut INIT KEIN volles Level
+    mehr - aber die unmittelbare Umgebung: der Startraum PLUS jeder Raum, der
+    direkt mit ihm verbunden ist (Tiefe 1, 2-4 Knoten, 1-3 Verbindungen je
+    Knoten). Alles weiter entfernte entsteht als Nebenprodukt von
+    resolve_model()s new_room-Feld, sobald die Erzaehlung es braucht.
 
     FIGUREN sind zurueck, aber anders: nicht als Levelplanung, sondern weil
     die Interaktion mit den Agenten der Kern des Spiels ist - allein in
     einem leeren Raum zu starten ist die Ausnahme, nicht die Norm. Die
-    Figuren stehen alle im Startraum (dem einzigen, der existiert), deshalb
+    Figuren stehen alle im Startraum (dem ersten in `nodes`), deshalb
     kein at-Feld - der Client setzt "n1" ein (state.World.from_init).
 
     DIRECTION legt VORAB fest, worauf die Geschichte hinauslaeuft - aber nur
@@ -94,6 +96,29 @@ def init_model() -> type[BaseModel]:
                         "and makes standing still a bad option - see THE "
                         "DIRECTION in the prompt.")
 
+    class StartNode(BaseModel):
+        model_config = STRICT
+
+        name: str = Field(
+            description="short place name, in the language of the start "
+                        "prompt")
+        anchor: str = Field(
+            description="permanent physical description in English. Only "
+                        "things that can be named and touched, and that "
+                        "will still be true in twenty scenes. No mood, no "
+                        "events, no people.")
+
+    class StartLink(BaseModel):
+        model_config = STRICT
+
+        from_name: str = Field(
+            description="name of one room in `nodes` this connection starts "
+                        "from - copied exactly")
+        to_name: str = Field(
+            description="name of the room in `nodes` it connects to - copied "
+                        "exactly. A plain door, corridor or stair between the "
+                        "two; both directions are passable.")
+
     class StartCharacter(BaseModel):
         model_config = STRICT
 
@@ -110,6 +135,10 @@ def init_model() -> type[BaseModel]:
                         "agenda points toward (a place, an object, a "
                         "person). Used by the client to make a decision you "
                         "never see.")
+        carries: list[str] = Field(
+            description="0-3 short English item names this person is holding "
+                        "when the scene opens. Empty for most people. This is "
+                        "where the pull object goes if someone starts with it.")
 
     class Init(BaseModel):
         model_config = STRICT
@@ -118,14 +147,16 @@ def init_model() -> type[BaseModel]:
             description="BCP-47 tag of the language the player wrote the "
                         "start prompt in, e.g. de or en. Every player-facing "
                         "text in this game must use it.")
-        start_node_name: str = Field(
-            description="short place name, in the language of the start "
-                        "prompt")
-        start_node_anchor: str = Field(
-            description="permanent physical description in English. Only "
-                        "things that can be named and touched, and that "
-                        "will still be true in twenty scenes. No mood, no "
-                        "events, no people.")
+        nodes: list[StartNode] = Field(
+            description="2 to 4 rooms: the room the player starts in FIRST, "
+                        "then every room directly connected to it. Depth 1 "
+                        "only - do not build a whole level, distant rooms "
+                        "appear later through play.")
+        connections: list[StartLink] = Field(
+            description="undirected links between rooms in `nodes`. Every "
+                        "room has 1 to 3 connections, the whole set is "
+                        "reachable from the start room, and the start room "
+                        "has at least one.")
         direction: Direction = Field(
             description="the stakes this story runs on, fixed abstractly "
                         "before anyone acts. Hidden from the player - the "
@@ -140,10 +171,10 @@ def init_model() -> type[BaseModel]:
                         "for a prompt that is explicitly about being alone.")
         opening_narration: str = Field(
             description="scene 1, in the language of the start prompt, "
-                        "second person, 60-120 words. Introduce anyone in "
-                        "starting_characters as part of the scene. No player "
-                        "action has happened yet, so nothing here may react "
-                        "to one.")
+                        "second person, 60-120 words. Describe ONLY the "
+                        "start room (the first in `nodes`) and the people in "
+                        "it - not the connected rooms. No player action has "
+                        "happened yet, so nothing here may react to one.")
         opening_image_prompt: str = Field(
             description="English image description of the opening scene: "
                         "place, light, materials, perspective, and anyone "
@@ -270,6 +301,20 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
             description="short English physical clause, checkable - what "
                         "happened, not how it felt or who noticed it")
 
+    ItemTo = Literal[                                    # type: ignore[valid-type]
+        char_ids + node_ids + ("player", "gone")]
+
+    class ItemMove(BaseModel):
+        model_config = STRICT
+        item: str = Field(
+            description="short English name of the object, e.g. 'the "
+                        "encrypted radio', 'the ledger'")
+        to: ItemTo = Field(
+            description="where it ends up: 'player', a character id, a room "
+                        "id (set down there, no longer carried), or 'gone' "
+                        "(destroyed or lost). Once carried it stays with that "
+                        "holder until another item_move shifts it.")
+
     class NewRoom(BaseModel):
         model_config = STRICT
         # Pflichtfeld statt NewRoom | None: "kein neuer Raum" ist der leere
@@ -318,6 +363,9 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
                 description="English, one noun or short noun phrase: what "
                             "this agenda points toward. Used by the client "
                             "to decide things - you never see it again.")
+            carries: list[str] = Field(
+                description="0-3 short English item names this character "
+                            "arrives holding. Empty for most.")
 
         class ResolvePlayer(BaseModel):
             model_config = STRICT
@@ -351,6 +399,10 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
                             "audible - what actually happened this turn. "
                             "You do not decide who witnesses it, only "
                             "where and what.")
+            item_moves: list[ItemMove] = Field(
+                description="objects that changed hands, were picked up, set "
+                            "down, or destroyed this turn. Usually empty. "
+                            "Keeps carried objects from teleporting.")
 
         return ResolvePlayer
 
@@ -381,8 +433,43 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
                         "to the node where it is visible or audible - what "
                         "actually happened this turn. You do not decide who "
                         "witnesses it, only where and what.")
+        item_moves: list[ItemMove] = Field(
+            description="objects that changed hands, were picked up, set "
+                        "down, or destroyed this turn. Usually empty. Keeps "
+                        "carried objects from teleporting.")
 
     return ResolveAgentic
+
+
+def normalize_model() -> type[BaseModel]:
+    """Die Spieler-Eingabe in die Ich-Perspektive gebracht, bevor sie in den
+    Ledger geht.
+
+    Der Spieler steuert nur die eigene Figur. Schreibt er "Du nimmst das
+    Radio" oder "Er geht zur Tuer", ist das trotzdem SEINE Handlung - das
+    Modell soll sie nicht einer anderen Figur zuschreiben. Text in
+    Anfuehrungszeichen ist woertliche Spielerrede und bleibt unangetastet.
+
+    Ein billiger Aufruf ohne Denkprozess (call="normalize", nie in
+    THINK_CALLS). Statisch, ohne Ids - reine Textumformung.
+    """
+    class Normalized(BaseModel):
+        model_config = STRICT
+
+        text: str = Field(
+            description="the player's action, rewritten so every action is "
+                        "in the first person ('I take the radio', 'I go to "
+                        "the door'). Keep any \"...\" quoted speech word for "
+                        "word. Same language as the input. Add nothing, drop "
+                        "nothing, resolve nothing - only change the "
+                        "grammatical person.")
+
+    return Normalized
+
+
+def normalized_text(normalized) -> str:
+    """Der umgeformte Eingabetext - siehe narration_text()."""
+    return normalized.text
 
 
 def narrate_model() -> type[BaseModel]:

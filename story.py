@@ -106,6 +106,28 @@ PARTS = ("init.txt", "decide.txt", "resolve_player.txt",
 # selten je braucht.
 _FALLBACK_NAMES = ["Vale", "Marrow", "Osei", "Brandt", "Iker"]
 
+# Greift, wenn ein Spielsystem kein eigenes normalize.txt mitbringt (wie
+# npc_names.txt optional, NICHT in PARTS). Bringt die Spieler-Eingabe in die
+# Ich-Perspektive, bevor sie in den Ledger geht - der Spieler steuert nur die
+# eigene Figur, "Du nimmst das Radio" ist trotzdem seine Handlung. Text in
+# Anfuehrungszeichen ist woertliche Rede und bleibt.
+_FALLBACK_NORMALIZE = """\
+# INPUT NORMALIZER
+
+You receive one line: what the player wants their character to do this turn.
+Rewrite it so that every action is in the first person - "I take the radio",
+"I step back", "I ask him why". The player only ever controls their own
+character: if the line says "Du nimmst das Radio" or "Er geht zur Tuer",
+that is still the PLAYER doing it - never attribute it to someone else.
+
+Anything inside double quotes "..." is a line the player says out loud. Keep
+it word for word, in quotes.
+
+Do not resolve the action, do not add detail, do not drop detail, do not
+change the language. Only fix the grammatical person. If the line is already
+first person, return it unchanged.
+"""
+
 # Die Szenengrenze liegt jetzt hier, nicht mehr im Modelloutput. Frueher
 # meldete das Modell game.scene_number und game.status, und der Client
 # zaehlte "hilfsweise" selbst mit - er wusste die Zahl also die ganze Zeit
@@ -124,14 +146,19 @@ MIN_SCENES = 8
 _PHASE_NOTE = {
     "setup":    "Early scene. Establish who wants what and let the situation "
                 "take shape; you do not need a hard turn yet.",
-    "commit":   "Mid-game. Positions harden and choices start to cost. Do not "
-                "let the scene idle - move something.",
-    "escalate": "Late game. Push open conflicts toward a break: someone acts, "
-                "something gives, a cost lands. Escalation is PEOPLE pushing "
-                "harder and stakes rising - not the building turning hostile. "
-                "Do not add shaking floors, strobing lights, sirens, doors "
-                "sealing on their own. Do not let a scene go quiet. The game "
-                "ends at scene 15 no matter what.",
+    "commit":   "Mid-game. The situation has taken shape. Something should "
+                "move now - a choice made, a line said, a question answered "
+                "- not just more of the same.",
+    "escalate": "Late game. Bring the thing the start prompt set up to a "
+                "point: it gets answered, decided, given, refused, or lost. "
+                "That can be loud or very quiet. It is the ORIGINAL thread "
+                "coming to a head, not a new side-drama. The room stays "
+                "ordinary - no shaking floors, no doors or alarms acting on "
+                "their own. The player can always act: if they walk out, "
+                "call for someone, or step back, that lands - do not resolve "
+                "every such attempt as 'someone stops them', that just traps "
+                "the story in one room. The game ends at scene 15 no matter "
+                "what.",
 }
 
 
@@ -227,6 +254,13 @@ class Game:
         names_file = system_dir / "npc_names.txt"
         self.npc_names = (names_file.read_text(encoding="utf-8").split()
                           if names_file.is_file() else list(_FALLBACK_NAMES))
+
+        # normalize.txt ist ebenfalls optional (nicht in PARTS) - Rueckfall
+        # auf _FALLBACK_NORMALIZE. Bringt die Spieler-Eingabe in die
+        # Ich-Perspektive (_normalize_input), bevor sie in den Ledger geht.
+        norm_file = system_dir / "normalize.txt"
+        self.normalize_prompt = (norm_file.read_text(encoding="utf-8")
+                                 if norm_file.is_file() else _FALLBACK_NORMALIZE)
 
         # Die Welt entsteht erst in begin(). Bis dahin gibt es sie nicht -
         # und das soll man auch sehen koennen.
@@ -338,6 +372,11 @@ class Game:
         log: list[str] = []   # abgelehnte Operationen, fuers Debug-Log
         turn_number = world.scene_number + 1
 
+        # Die Spieler-Eingabe zuerst in die Ich-Perspektive bringen (siehe
+        # _normalize_input) - alles danach (RESOLVE, NARRATE, Ledger) sieht
+        # nur noch die normalisierte Form.
+        player_input = self._normalize_input(player_input)
+
         # --- 1. Spieler-Resolve, mit Charakterquote-Notbremse ---
         # Ab Runde 6 (turn_number > 5) ist ein Charakter PFLICHT, solange
         # ueberhaupt keine Figur existiert (INIT setzt normalerweise schon
@@ -392,7 +431,7 @@ class Game:
         if agents:
             if on_actor:
                 on_actor(self._acting_label(agents))
-            decisions = self._decide_all(world, agents)
+            decisions = self._decide_all(world, agents, player_input)
             for npc, decision in zip(agents, decisions):
                 if decision is not None:
                     npc.aim = decision.aim
@@ -429,8 +468,14 @@ class Game:
         # Der Client entscheidet ueber das Ende, nicht das Modell. can_end
         # ist ein Vorschlag: er zaehlt erst ab MIN_SCENES, und die harte
         # Grenze bei MAX_SCENES gilt unabhaengig davon.
-        completed = (world.scene_number >= MAX_SCENES
-                     or (narrate.can_end and world.scene_number >= MIN_SCENES))
+        completed = (
+            world.scene_number >= MAX_SCENES
+            or (narrate.can_end and world.scene_number >= MIN_SCENES)
+            # Der Spieler hat den Kernschauplatz ueber eine Einbahn verlassen
+            # und kommt nicht zurueck - "raus, wo alles spielte" ist ein
+            # legitimes Ende (Playtest "Schneesturm": der Spieler wollte den
+            # Berg runter, kam nie raus, das Spiel endete als Standbild).
+            or (world.player_stranded() and world.scene_number >= MIN_SCENES))
 
         # schema.narration_text() statt das Feld direkt zu lesen: die
         # FELDNAMEN des Ausgabeformats sollen ausschliesslich in schema.py
@@ -438,6 +483,11 @@ class Game:
         narration, image_prompt = schema.narration_text(narrate)
         self._check_narration_leak(narration, world)
         world.remember(narration)
+        # Der aktuelle Ort gilt ab JETZT als besucht - NARRATE hat ihn eben
+        # gesehen. Erst nach erfolgreichem NARRATE, damit render_player_place()
+        # in genau dieser Runde noch "erstes Mal hier" melden konnte.
+        if world.player_at not in world.visited:
+            world.visited.append(world.player_at)
 
         self.world = world   # erst jetzt committen
 
@@ -470,12 +520,14 @@ class Game:
         """
         p = _phase(turn)
         block = f"SCENE {turn} of {MAX_SCENES}\nPHASE {p}: {_PHASE_NOTE[p]}"
-        if turn >= MAX_SCENES - 2:
-            block += ("\nCLOSING: the game is almost out of scenes. If the "
-                      "thing this story was about has been settled - taken, "
-                      "given, signed, refused for good, destroyed - and no "
-                      "fresh open question has replaced it, this is the end: "
-                      "report can_end true.")
+        if turn >= MAX_SCENES - 3:
+            block += ("\nCLOSING: only a few scenes left. If the thing this "
+                      "story was about has been settled OR walked away from "
+                      "for good OR made moot by what has happened - and the "
+                      "scene is now just winding down or drifting - this is "
+                      "the end: report can_end true. A messy, unresolved, or "
+                      "sad ending is still an ending. Do not hold the game "
+                      "open for a tidy resolution that is not coming.")
         return block
 
     def _resolve(self, world: World, actor_id: str, actor_node: str,
@@ -497,15 +549,20 @@ class Game:
         wusste und was ihm der Client zugefluestert hat.
         """
         resolve_cls = schema.resolve_model(
-            world.node_ids(), world.active_ids(), world.exits_from(actor_node),
-            mode)
+            world.node_ids(), world.resolvable_ids(),
+            world.exits_from(actor_node), mode)
 
         prompt_file = "resolve_player.txt" if mode == "player" else "resolve_agentic.txt"
         system = self._system(self.prompts[prompt_file], resolve_cls)
 
         phase_block = self._director_block(turn)
         direction_block = f"{direction}\n\n" if direction else ""
-        user = (f"{phase_block}\n\nWORLD STATE:\n{world.render()}\n\n"
+        # Der Startprompt (Spielerworte, kein Geheimnis) in jeden RESOLVE:
+        # ohne ihn driftet das Ergebnis ab Szene ~8 vom Setting weg
+        # (Playtests: Schneesturm -> Schmerzmittel-Streit, Geschworener ->
+        # Flur-Pruegelei). Er erdet das Delta an dem, worum es geht.
+        user = (f"THE STORY THE PLAYER STARTED:\n{self.start_prompt}\n\n"
+                f"{phase_block}\n\nWORLD STATE:\n{world.render()}\n\n"
                 f"{direction_block}{action_block}")
 
         self._log_block(f"RESOLVE {actor_id} / phase", phase_block)
@@ -522,6 +579,42 @@ class Game:
         self._log_block(f"RESOLVE {actor_id} / result",
                         reply.value.model_dump_json(indent=2))
         return reply.value
+
+    def _normalize_input(self, raw: str) -> str:
+        """Die Spieler-Eingabe in die Ich-Perspektive bringen, bevor sie in
+        den Ledger geht.
+
+        Der Spieler steuert nur die eigene Figur - "Du nimmst das Radio" /
+        "Er geht zur Tuer" ist trotzdem SEINE Handlung und darf nicht einer
+        anderen Figur zugeschrieben werden. Text in "..." ist woertliche
+        Spielerrede und bleibt unangetastet.
+
+        Fast-Path (kein Modellaufruf), wenn die Eingabe schon Ich-Form ohne
+        Rede ist oder aus genau einem Rede-Zitat besteht. Sonst ein billiger
+        strukturierter Aufruf ohne Denkprozess (call="normalize").
+        """
+        text = raw.strip()
+        if not text:
+            return raw
+        if '"' not in text and re.match(r"(?i)(ich|wir|i|we)\b", text):
+            return text
+        if text.startswith('"') and text.endswith('"') and text.count('"') == 2:
+            return text
+
+        try:
+            cls = schema.normalize_model()
+            system = self._system(self.normalize_prompt, cls)
+            reply = self.engine.structured(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": f"PLAYER LINE:\n{text}"}],
+                cls, call="normalize")
+            out = schema.normalized_text(reply.value).strip()
+        except Exception as e:
+            self._log_block("NORMALIZE failed - using raw input", str(e))
+            return text
+
+        self._log_block("NORMALIZE", f"{text}\n--\n{out}")
+        return out or text
 
     def _resolve_block_player(self, player_input: str) -> str:
         return f"ACTING: the player\nPLAYER ACTION:\n{player_input}\n"
@@ -540,7 +633,7 @@ class Game:
             return f"{agents[0].name} is acting"
         return f"{len(agents)} characters are acting"
 
-    def _decide_all(self, world: World, agents: list):
+    def _decide_all(self, world: World, agents: list, player_input: str = ""):
         """Je Figur ihr DECIDE, gefaechert gegen vLLM. Rueckgabe: Liste in
         agents-Reihenfolge, None wo das DECIDE einer Figur gescheitert ist
         (nur ihr Zug entfaellt, Design-Doc §7).
@@ -551,29 +644,35 @@ class Game:
         world-mutierende RESOLVE laeuft danach seriell. structured() ist nach
         dem M4-Umbau re-entrant, _log_block() ist gelockt.
 
+        player_input ist die (normalisierte) Spieleraktion dieser Runde - sie
+        wird jeder co-lokierten Figur als "das ist GERADE passiert" in den
+        DECIDE-Kontext gehaengt, damit die Figur darauf reagiert statt auf
+        eine alte Erinnerung (Playtest "Schneesturm": Thomas bekam den
+        Auftrag des Spielers nie mit).
+
         Ein einzelner Agent laeuft ohne Pool - dann ist der Pfad byteweise
         der von vor dem Umbau.
         """
         if len(agents) == 1:
-            return [self._decide_safe(world, agents[0])]
+            return [self._decide_safe(world, agents[0], player_input)]
 
         workers = min(len(agents), LLM_CONCURRENCY)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(self._decide_safe, world, npc)
+            futures = [pool.submit(self._decide_safe, world, npc, player_input)
                        for npc in agents]
             return [f.result() for f in futures]
 
-    def _decide_safe(self, world: World, npc):
+    def _decide_safe(self, world: World, npc, player_input: str = ""):
         """_decide() mit Fehlerisolierung: ein gescheitertes DECIDE gibt None
         zurueck (und wird geloggt), statt die ganze Faecherung zu reissen."""
         try:
-            return self._decide(world, npc)
+            return self._decide(world, npc, player_input)
         except Exception as e:
             self._log_thinking(getattr(e, "thinking", ""), "decide")
             self._log_block(f"DECIDE {npc.id} failed - skipped", str(e))
             return None
 
-    def _decide(self, world: World, npc):
+    def _decide(self, world: World, npc, player_input: str = ""):
         """Eine Figur fuer sich entscheiden lassen, aus IHRER Wahrnehmung
         allein.
 
@@ -588,6 +687,14 @@ class Game:
 
         system = self._system(self.prompts["decide.txt"], decide_cls)
         user = world.render_for(npc)
+        # Die frische Spieleraktion getrennt anhaengen - aber nur, wenn der
+        # Spieler mit dieser Figur im selben Raum steht (sonst hat sie es
+        # nicht mitbekommen). render_for() haelt die "Nichtwissen ist
+        # Kontextfenster"-Regel; dieser Zusatz bricht sie nicht, er markiert
+        # nur, was von dem, was die Figur ohnehin wahrnimmt, GERADE geschah.
+        if player_input and world.player_at == npc.at:
+            user += (f"\n\nTHIS ROUND THE PLAYER JUST DID / SAID:\n"
+                     f"{player_input}")
 
         self._log_block(f"DECIDE / {npc.id} context", user)
 
@@ -624,6 +731,7 @@ class Game:
                  f"not a single foreign word. Second person, and keep the "
                  f"same form of address the player used (du vs Sie, tu vs "
                  f"vous, ...) for the whole game.", "",
+                 f"THE STORY THE PLAYER STARTED:\n{self.start_prompt}", "",
                  self._director_block(turn), "",
                  f"YOUR PLACE:\n{world.render_player_place()}", ""]
         if visible_events:

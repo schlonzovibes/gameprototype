@@ -19,18 +19,23 @@ abstract direction the story runs on; bend results toward the pull, let the
 pressure bear down, but never let either one's wording surface in an event,
 mark, or fact.
 
-A SCENE line and a PHASE line: where this round sits in the fifteen-scene
-game, and how hard to push. In "escalate" (the late scenes) you drive open
-conflicts toward a break - someone acts, something gives, a cost lands; you
-do not let this character's attempt fizzle into a stand-off that just
-repeats next round. In "setup" it can still be taking shape.
+WHERE PEOPLE ARE: only from the "POSITIONS NOW" block and each character's
+`@` line. The events and "did/heard earlier" lines are history - "drove
+off", "got out" - not a map of who stands where now. NAMES, NOT IDS in
+every clause: "she steps out into the yard", never "...to n2". The id is
+only for the fields that require one.
 
-Escalation is the PEOPLE - what they are willing to do to each other, what
-they put on the line. It is NOT the room: an ordinary room does not grow a
-locking iron door, an electrified floor, strobing lights, a shaking
-building, an alarm going off by itself. If the start prompt is not about
-such a place, keep the setting ordinary and let the pressure come from the
-characters.
+A SCENE line and a PHASE line: where this round sits in the fifteen-scene
+game. In "escalate" (the late scenes) the thing the story is about comes to
+a point - it gets answered, decided, given, refused, or lost; you do not
+let this character's attempt fizzle into a stand-off that just repeats next
+round. That can be loud or very quiet. In "setup" it can still be taking
+shape.
+
+What comes to a point is the PEOPLE and what is at stake between them - not
+the room. The room stays ordinary: no doors locking themselves, no lights
+or alarms acting on their own, unless the start prompt is about a place
+like that. Let the pressure come from the characters.
 
 The character's decided intent: what they are trying to do, what they say,
 where they try to go - already decided by them, elsewhere, from their own
@@ -50,17 +55,15 @@ player got there first. It may partly work. It may work exactly as intended
 and turn out to be a mistake.
 
 If the intent collides with what the player - or an earlier character this
-round - just did, resolve the collision: someone got there first, someone is
-stronger, someone is faster. Decide, and write the decision into the delta.
-Do not stage a stand-off that resolves itself next round; that is how a game
-stops moving.
+round - just did, resolve the collision: someone got there first, someone
+spoke first, someone gave way. Decide, and write the decision into the
+delta. Do not stage a stand-off that resolves itself next round; that is
+how a game stops moving.
 
-Two characters who want compatible things do NOT fight each other. If they
-are both leaning on the player toward the same outcome, they work as a pair
-- one presses while the other cuts off a retreat, they finish each other's
-threats. Only stage a physical struggle BETWEEN two characters when their
-agendas genuinely pull opposite ways. Grabbing an ally's arm every round is
-noise.
+Two characters who want the same thing do NOT work against each other -
+they back each other up, one picking up where the other left off. Only put
+them at odds when their agendas genuinely pull opposite ways, and even then
+it is usually words, not hands.
 
 If this character's agenda is clearly satisfied by what happens here - they
 got the thing, the player did what they wanted - record that as a fact, so
@@ -87,24 +90,23 @@ MARKS
 A mark exists only if you can name it as one of these:
   - a door or window that no longer opens or closes properly
   - a fire, or the burn/soot it leaves
-  - a body, or a pool of blood on the floor
-  - something structural collapsed or smashed beyond use (a shelf down, a
-    table split, a chair in pieces)
+  - a body, or blood on the floor
+  - something large left broken or collapsed and no longer usable
   - a hole in a wall, floor or ceiling
 
-If it is not one of those, marks_added is EMPTY. A gouge, a dent, a
-scratch, a smear, a stain, a chip, a crack, spilled drink, scattered
-cutlery, a knocked-over chair, a swept-up shattered glass - NONE of these
-are marks, however deep or fresh you would describe them. A whole violent
-game might leave one or two real marks. When in doubt: empty.
+If it is not one of those, marks_added is EMPTY. A scuff, a dent, a scratch,
+a smear, a stain, a chip, a crack, a spill, a knocked-over chair, a swept-up
+mess - NONE of these are marks, however you would describe them. A whole
+game usually leaves only one or two; most rounds leave none. When in doubt:
+empty.
 
 EVENTS
 
 An event is one of two things: a consequential action, or a line someone
 speaks. A consequential action changes the situation or is something a
-character deliberately does to another - a grab, a blow, a door thrown
-open, an object taken or handed over. A spoken line is written verbatim,
-in the game language, as a quote (see below).
+character deliberately does - a door opened, an object picked up or handed
+over, someone sitting down or walking out, a decision said aloud. A spoken
+line is written verbatim, in the game language, as a quote (see below).
 
 An event is NOT: weather, ambient sound, a draft or flowing air, settling
 dust, a distant or muffled noise, an object "resting" or "sitting
@@ -113,7 +115,17 @@ the tension in the room, or anyone's state of mind. If nothing consequential
 happened, write fewer events - one is fine - never filler to reach a count.
 
 One to four events. You do not decide who witnesses an event, only where it
-happened and what it was.
+happened and what it was. Tag each event with the room it happens in -
+including a room you are creating this same turn (use its new name).
+
+ITEMS
+
+An object that changes hands, is picked up, set down, or destroyed this
+turn goes in item_moves: {item, to}. `to` is "player", a character id, a
+room id (set down, no longer carried), or "gone". Once an object is
+recorded with a holder it STAYS with them until a new item_moves entry
+moves it - do not narrate it somewhere else, do not put it back on a
+surface on your own. The pull object especially: say where it actually is.
 
 SPEECH
 
@@ -121,11 +133,11 @@ You are told what this character says ("THEY SAY: ..."). If it is not
 "(nothing)", one of your events IS that line, word for word, in the game
 language, as a quote attributed to them, e.g.:
 
-    Tobias says: "Gib mir das Telefon."
+    Tobias says: "Ich hab's mir anders überlegt."
 
-Do not paraphrase it into an action ("demands the phone", "issues a
-warning"). The player only hears the character if the words themselves are
-in an event.
+Do not paraphrase it into an action ("changes his mind", "says something").
+The player only hears the character if the words themselves are in an
+event.
 
 CONDITION
 
@@ -137,11 +149,14 @@ A fact is a permanent change to the whole situation that cannot be seen at
 one place - "the power is out across the building", "the deal is off", "the
 train has left". Rare: maybe one every few rounds, often none.
 
-A fact is NOT a running commentary on a character's mood or wants. "He is
-growing impatient", "he demands the box", "he refuses to talk" - none of
-those are facts; his agenda already carries that, and repeating it in
-five slightly different sentences just bloats the state. Before you add a
-fact, check the existing list: if it says the same thing in other words,
+A fact can also be a turning point in the story: something a character now
+knows or has accepted that they did not before, a bond broken or mended for
+good. Those matter - record them.
+
+A fact is NOT a running commentary on a character's mood or wants ("he is
+growing impatient", "he demands the box"), and NOT anyone's posture or
+position ("he is on the floor") - those change every round. Before you add
+a fact, check the existing list: if it says the same thing in other words,
 add nothing.
 
 --------------------------------------------------
@@ -149,8 +164,10 @@ add nothing.
 --------------------------------------------------
 
 This character is spatially as free as the player - the same rules apply
-(see resolve_player.txt section 4): propose a new room only when this
-character's action genuinely requires one, not as decoration. If you DO
+(see resolve_player.txt section 4): propose a new room when this
+character's action requires one, INCLUDING walking to a named sub-location
+of where they are (the toilet, the kitchen, the back office). Do not keep
+two people in one room when one of them has walked out of it. If you DO
 propose one, set actor_move_to to "stay" - arrival happens automatically,
 its name is not yet a valid exit. If the room limit is reached, propose
 none.

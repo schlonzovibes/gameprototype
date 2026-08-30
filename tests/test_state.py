@@ -47,9 +47,17 @@ def _delta(**overrides):
     einzelne Felder ueberschreiben, was ein Test gerade braucht."""
     base = dict(new_room=_no_room(), actor_move_to="stay", moves=[],
                status_changes=[], marks_added=[], facts_added=[],
-               characters_introduced=[], events=[])
+               characters_introduced=[], events=[], item_moves=[])
     base.update(overrides)
     return types.SimpleNamespace(**base)
+
+
+def _item_move(item, to):
+    return types.SimpleNamespace(item=item, to=to)
+
+
+def _status_change(character, status):
+    return types.SimpleNamespace(character=character, status=status)
 
 
 class RenderForTest(unittest.TestCase):
@@ -155,11 +163,20 @@ class WorldCopyTest(unittest.TestCase):
 
 # ------------------------------------------------------------- A-H (neuer Brief)
 
+def _snode(name, anchor=""):
+    return types.SimpleNamespace(name=name, anchor=anchor)
+
+
+def _slink(a, b):
+    return types.SimpleNamespace(from_name=a, to_name=b)
+
+
 def _init_stub(**over):
-    """Ein INIT-Objekt-Stub: Startraum, leere Richtung, keine Figuren -
+    """Ein INIT-Objekt-Stub: ein Startraum, leere Richtung, keine Figuren -
     einzelne Felder ueberschreiben, was ein Test braucht."""
-    base = dict(language="en", start_node_name="Gas Station",
-                start_node_anchor="fluorescent lit, wet floor",
+    base = dict(language="en",
+                nodes=[_snode("Gas Station", "fluorescent lit, wet floor")],
+                connections=[],
                 direction=types.SimpleNamespace(pull="", pressure=""),
                 starting_characters=[])
     base.update(over)
@@ -167,7 +184,7 @@ def _init_stub(**over):
 
 
 class FromInitTest(unittest.TestCase):
-    """World.from_init() liefert einen Knoten, die abstrakte Richtung und
+    """World.from_init() liefert die Startknoten, die abstrakte Richtung und
     0-2 Startfiguren."""
 
     def test_single_node_no_characters(self):
@@ -175,6 +192,7 @@ class FromInitTest(unittest.TestCase):
         self.assertEqual(list(world.nodes.keys()), ["n1"])
         self.assertEqual(world.characters, {})
         self.assertEqual(world.player_at, "n1")
+        self.assertEqual(world.visited, ["n1"])
 
     def test_direction_is_carried_over(self):
         world = World.from_init(_init_stub(
@@ -198,6 +216,41 @@ class FromInitTest(unittest.TestCase):
         self.assertEqual(world.characters["c1"].hidden_target, "the register")
         self.assertEqual(world.characters["c2"].hidden_target, "the door")
         self.assertEqual(world.character_quota_status(6), "")   # Quote erfuellt
+
+
+class StartingMapTest(unittest.TestCase):
+    """World.from_init() legt Startraum + direkt erreichbare Raeume an und
+    verdrahtet die connections beidseitig."""
+
+    def test_multi_node_map_wired_both_ways(self):
+        world = World.from_init(_init_stub(
+            nodes=[_snode("Lobby"), _snode("Office"), _snode("Yard")],
+            connections=[_slink("Lobby", "Office"), _slink("Office", "Yard")]))
+        self.assertEqual(list(world.nodes), ["n1", "n2", "n3"])
+        self.assertEqual(world.player_at, "n1")
+        self.assertEqual(set(world.exits_from("n1")), {"n2"})
+        self.assertEqual(set(world.exits_from("n2")), {"n1", "n3"})
+        self.assertEqual(set(world.exits_from("n3")), {"n2"})
+
+    def test_unknown_and_self_links_are_skipped(self):
+        world = World.from_init(_init_stub(
+            nodes=[_snode("Lobby"), _snode("Office")],
+            connections=[_slink("Lobby", "Nowhere"), _slink("Office", "Office"),
+                         _slink("Lobby", "Office")]))
+        self.assertEqual(set(world.exits_from("n1")), {"n2"})
+        self.assertEqual(set(world.exits_from("n2")), {"n1"})
+
+    def test_no_node_exceeds_three_connections(self):
+        # K4 (alle 6 Kanten) + eine Dublette: jeder Knoten haette Grad 3,
+        # die Dublette darf keinen auf 4 heben.
+        names = ["Hub", "A", "B", "C"]
+        edges = [("Hub", "A"), ("Hub", "B"), ("Hub", "C"), ("A", "B"),
+                 ("A", "C"), ("B", "C"), ("Hub", "A")]
+        world = World.from_init(_init_stub(
+            nodes=[_snode(n) for n in names],
+            connections=[_slink(a, b) for a, b in edges]))
+        self.assertTrue(all(len(n.exits) <= 3 for n in world.nodes.values()))
+        self.assertEqual(len(world.nodes["n1"].exits), 3)
 
 
 class AddNodeTest(unittest.TestCase):
@@ -439,6 +492,135 @@ class SpawnFallbackCharacterTest(unittest.TestCase):
         world.add_character("Vogel", "n1", "get out", is_agentic=True)
         char_id = world.spawn_fallback_character(["Vale"])
         self.assertFalse(world.characters[char_id].is_agentic)
+
+
+class InventoryTest(unittest.TestCase):
+    """item_moves verschiebt Objekte zwischen Spieler- und Figuren-Inventar,
+    haelt die Obergrenze ein und macht sie in den Renderern sichtbar."""
+
+    def test_pickup_by_player_and_handover_to_character(self):
+        world = _world()
+        world.apply_turn("player", _delta(
+            item_moves=[_item_move("the encrypted radio", "player")]))
+        self.assertEqual(world.player_carries, ["the encrypted radio"])
+        # an eine Figur weitergeben -> raus aus player_carries, rein bei c1
+        world.apply_turn("player", _delta(
+            item_moves=[_item_move("radio", "c1")]))
+        self.assertEqual(world.player_carries, [])
+        self.assertEqual(world.characters["c1"].inventory, ["radio"])
+
+    def test_gone_and_node_targets_just_remove(self):
+        world = _world()
+        world.player_carries = ["a knife"]
+        world.apply_turn("player", _delta(item_moves=[_item_move("knife", "gone")]))
+        self.assertEqual(world.player_carries, [])
+        world.characters["c1"].inventory = ["a wrench"]
+        world.apply_turn("player", _delta(item_moves=[_item_move("wrench", "n1")]))
+        self.assertEqual(world.characters["c1"].inventory, [])
+
+    def test_inventory_limit_rejects_overflow(self):
+        world = _world()
+        world.player_carries = ["a", "b", "c"]
+        rej = world.apply_turn("player", _delta(
+            item_moves=[_item_move("the ledger", "player")]))
+        self.assertEqual(world.player_carries, ["a", "b", "c"])
+        self.assertTrue(any("inventory full" in r for r in rej))
+
+    def test_render_shows_player_and_own_inventory_not_others(self):
+        world = _world()
+        world.player_carries = ["the radio"]
+        world.characters["c1"].inventory = ["a photo"]
+        self.assertIn("PLAYER CARRIES: the radio", world.render())
+        self.assertIn("carries: a photo", world.render())
+        # render_for(c2): sieht das eigene (leere) nicht, fremdes c1 nicht,
+        # den Spieler nicht (c2 steht an n3, Spieler an n1)
+        out = world.render_for(world.characters["c2"])
+        self.assertNotIn("a photo", out)
+        self.assertNotIn("the radio", out)
+        # c1 steht mit dem Spieler an n1 -> sieht dessen Hand + das eigene
+        out1 = world.render_for(world.characters["c1"])
+        self.assertIn("YOU ARE CARRYING: a photo", out1)
+        self.assertIn("THE PLAYER IS HOLDING: the radio", out1)
+
+
+class VisitedTest(unittest.TestCase):
+    """render_player_place() schaltet zwischen 'erstes Mal hier' und 'schon
+    mal hier' anhand von World.visited."""
+
+    def test_first_time_vs_been_here(self):
+        world = _world()
+        self.assertIn("FIRST TIME IN THIS PLACE", world.render_player_place())
+        world.visited.append("n1")
+        self.assertIn("YOU HAVE BEEN HERE BEFORE", world.render_player_place())
+
+
+class PositionRenderTest(unittest.TestCase):
+    """Positionen kommen aus EINEM Block; Klartext nutzt Namen, nicht Ids."""
+
+    def test_render_has_positions_now_block_with_names(self):
+        world = _world()
+        out = world.render()
+        self.assertIn("POSITIONS NOW", out)
+        self.assertIn("player: Hall (n1)", out)
+        self.assertIn("Vogel: Hall (n1)", out)
+        self.assertIn("Renner: Attic (n3)", out)
+        # char-Zeile traegt jetzt den Ortsnamen
+        self.assertIn("@Hall (n1)", out)
+
+    def test_render_for_flags_player_absence_and_labels_memory_as_past(self):
+        world = _world()
+        world.characters["c2"].memory = ["the player drove off"]
+        out = world.render_for(world.characters["c2"])   # c2 @n3, Spieler @n1
+        self.assertIn("THE PLAYER IS NOT HERE", out)
+        self.assertIn("WHAT HAPPENED EARLIER", out)
+
+
+class ResolvableIdsTest(unittest.TestCase):
+    def test_includes_disabled_excludes_dead(self):
+        world = _world()
+        world.characters["c1"].status = "disabled"
+        world.characters["c2"].status = "dead"
+        self.assertEqual(world.active_ids(), ())
+        self.assertEqual(world.resolvable_ids(), ("c1",))
+
+
+class PlayerStrandedTest(unittest.TestCase):
+    def test_stranded_only_when_no_path_back_to_n1(self):
+        world = _world()                       # n1<->n2, n3 keine Exits, Spieler n1
+        self.assertFalse(world.player_stranded())        # steht auf n1
+        world.player_at = "n2"
+        self.assertFalse(world.player_stranded())        # n2 -> n1
+        # n4 einbahn von n1 anhaengen, Spieler dorthin -> kein Rueckweg
+        world.add_node("Cliff", "air", from_node="n1", one_way=True,
+                       justification="the ledge crumbled")
+        world.player_at = "n4"
+        self.assertTrue(world.player_stranded())
+
+    def test_completed_via_stranded_needs_min_scenes(self):
+        # nur die World-Seite hier; die MIN_SCENES-Kopplung testet test_story
+        world = _world()
+        world.add_node("Road", "gravel", from_node="n1", one_way=True,
+                       justification="the gate locked behind you")
+        world.player_at = "n4"
+        self.assertTrue(world.player_stranded())
+
+
+class StatusChangeRobustTest(unittest.TestCase):
+    def test_name_appended_to_id_still_applies(self):
+        world = _world()
+        world.apply_turn("player", _delta(
+            status_changes=[_status_change("c1 Vogel", "dead")]))
+        self.assertEqual(world.characters["c1"].status, "dead")
+        self.assertFalse(world.characters["c1"].is_agentic)
+
+    def test_disabled_character_can_be_killed(self):
+        world = _world()
+        world.characters["c1"].status = "disabled"
+        world.apply_turn("player", _delta(
+            status_changes=[_status_change("c1", "dead")]))
+        self.assertEqual(world.characters["c1"].status, "dead")
+
+
 
 
 if __name__ == "__main__":

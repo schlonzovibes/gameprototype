@@ -11,20 +11,29 @@ import schema
 
 class InitModelTest(unittest.TestCase):
     def test_field_shape(self):
-        """INIT erzeugt den Startraum, die abstrakte Richtung und 0-2
-        Figuren, keinen Graphen. direction und starting_characters stehen
-        VOR der Erzaehlung, damit die Erzaehlung sie aufgreifen kann."""
+        """INIT erzeugt die lokale Nachbarschaft (nodes + connections), die
+        abstrakte Richtung und 0-2 Figuren. direction und starting_characters
+        stehen VOR der Erzaehlung, damit die Erzaehlung sie aufgreifen kann."""
         Init = schema.init_model()
         self.assertEqual(
             list(Init.model_fields.keys()),
-            ["language", "start_node_name", "start_node_anchor", "direction",
+            ["language", "nodes", "connections", "direction",
              "starting_characters", "opening_narration", "opening_image_prompt"])
+
+    def test_start_node_and_link_fields(self):
+        Init = schema.init_model()
+        StartNode = Init.model_fields["nodes"].annotation.__args__[0]
+        self.assertEqual(list(StartNode.model_fields.keys()), ["name", "anchor"])
+        StartLink = Init.model_fields["connections"].annotation.__args__[0]
+        self.assertEqual(list(StartLink.model_fields.keys()),
+                         ["from_name", "to_name"])
 
     def test_start_character_fields(self):
         Init = schema.init_model()
         StartChar = Init.model_fields["starting_characters"].annotation.__args__[0]
         self.assertEqual(list(StartChar.model_fields.keys()),
-                         ["name", "agenda_draft", "agenda_target_hint"])
+                         ["name", "agenda_draft", "agenda_target_hint",
+                          "carries"])
 
     def test_direction_fields(self):
         Init = schema.init_model()
@@ -63,14 +72,29 @@ class ResolveModelTest(unittest.TestCase):
         self.assertEqual(
             list(Player.model_fields.keys()),
             ["new_room", "actor_move_to", "moves", "status_changes",
-             "marks_added", "facts_added", "characters_introduced", "events"])
+             "marks_added", "facts_added", "characters_introduced", "events",
+             "item_moves"])
 
     def test_field_order_agentic(self):
         Agentic = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "agentic")
         self.assertEqual(
             list(Agentic.model_fields.keys()),
             ["new_room", "actor_move_to", "moves", "status_changes",
-             "marks_added", "facts_added", "events"])
+             "marks_added", "facts_added", "events", "item_moves"])
+
+    def test_item_move_target_literal(self):
+        """item_moves.to nimmt Figuren-Ids, Knoten-Ids und die Sonderwerte
+        'player'/'gone' - nichts sonst."""
+        Player = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "player")
+        ItemMove = Player.model_fields["item_moves"].annotation.__args__[0]
+        self.assertEqual(list(ItemMove.model_fields.keys()), ["item", "to"])
+        enum = ItemMove.model_json_schema()["properties"]["to"]["enum"]
+        self.assertEqual(set(enum), {"c1", "n1", "n2", "player", "gone"})
+
+    def test_new_character_has_carries(self):
+        Player = schema.resolve_model(("n1",), ("c1",), ("n1",), "player")
+        NC = Player.model_fields["characters_introduced"].annotation.__args__[0]
+        self.assertIn("carries", NC.model_fields)
 
     def test_new_room_is_required_not_optional(self):
         """Regression fuer die Optional-Korrektur ggue. dem Brief-Wortlaut:
@@ -95,6 +119,15 @@ class ResolveModelTest(unittest.TestCase):
         Literal[()]-TypeError abstuerzen."""
         Agentic = schema.resolve_model(("n1",), (), ("n1",), "agentic")
         Agentic.model_json_schema()
+
+
+class NormalizeModelTest(unittest.TestCase):
+    def test_single_text_field(self):
+        Norm = schema.normalize_model()
+        self.assertEqual(list(Norm.model_fields.keys()), ["text"])
+        Norm.model_json_schema()
+        self.assertEqual(schema.normalized_text(Norm(text="I take it")),
+                         "I take it")
 
 
 class NarrateModelTest(unittest.TestCase):

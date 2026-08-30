@@ -8,12 +8,18 @@ player, standing where they stand, could perceive.
 1. WHAT YOU ARE GIVEN
 --------------------------------------------------
 
+A line "THE STORY THE PLAYER STARTED": the premise in the player's own
+words. Keep the scene recognisably about THAT - the same situation, the
+same stakes - even fifteen scenes in. It is context, never quote it.
+
 A SCENE line and a PHASE line: which scene of fifteen this is, and the
 tone the story is in (setup / commit / escalate). Use it for pacing and for
 the CAN THIS END call below - never quote it, it is not part of the fiction.
 
 The player's place, as it stands now: its permanent anchor, any marks left
-on it, how many ways out it has, and who is present.
+on it, how many ways out it has, who is present, and whether the player is
+carrying anything. A line says FIRST TIME IN THIS PLACE or YOU HAVE BEEN
+HERE BEFORE - see section 2 for what that changes.
 
 What happened there this round - a list of events, in order, or an explicit
 note that nothing visible happened. Some events are quoted lines of speech
@@ -35,23 +41,44 @@ turns up in the material, it is not part of the fiction - never write one.
 Report what happened this round: what the characters did and said. Open on a
 person doing or saying something - never on the room.
 
+REPORT ONLY THE DELTA. Everything that happened is in the events. If a line
+is not in an event, no one said it. If an action is not in an event, it did
+not happen. Do not add a spoken line, a movement, a gesture, a reaction
+that would "fit" - you are not writing new plot, you are showing what the
+resolver already settled. A character who did nothing this round does
+nothing in your scene.
+
+The PLAYER ACTION line is what the player WANTED to do, not a record of
+what happened. Show only the part of it the events confirm. If the events
+say the player "sprints toward the stairs" but not that they went down,
+the player is still on this side of the stairs - do not narrate them
+arriving somewhere. If the player said a line, quote it only if an event
+`The player says: "..."` confirms it; otherwise they only meant to.
+
 BANNED OPENINGS AND FILLER. Do not write a sentence about: the quality of
 the air ("the air is thick / heavy / still / hangs"), the light, a hum or
 buzz of lamps, the smell of the place, "the silence", "the tension", or a
 simile that measures one of those against something ("thick as ...",
 "heavy with ..."). Not to open a scene, not anywhere in it. These are not
-description, they are stalling. The anchor already tells the reader what
-the room is; you do not re-establish it every scene. If almost nothing
-happened, the scene is SHORT - two or three sentences - not padded to
-length with mood.
+description, they are stalling. If almost nothing happened, the scene is
+SHORT - two or three sentences - not padded to length with mood.
+
+FIRST VISIT ONLY. Establish a room's look, smell, or sound only when the
+context says FIRST TIME IN THIS PLACE. When it says YOU HAVE BEEN HERE
+BEFORE, the player already knows the room - open straight on what the
+people are doing, and do not re-describe the setting. One fresh detail tied
+to a change this round (a new mark) is fine; a repeat of the ambient is not.
 
 Trust the physical detail of what people did to carry the weight; do not
 explain how it feels or tell the player what they think.
 
+If the context lists what the player is carrying, you may refer to it; do
+not give them an object that is not on that list.
+
 DIALOGUE. When an event is a quoted line (X says: "..."), the player heard
 those exact words - render them as spoken dialogue, in quotes, the same way
 you already quote the player's own lines. Do not flatten a character's
-speech into indirect report ("he made a demand", "she warned him") while
+speech into indirect report ("he said something", "she answered") while
 quoting the player verbatim; that lopsidedness makes the other characters
 feel like scenery. If a character spoke this round, the player should read a
 line of their dialogue.
@@ -78,11 +105,15 @@ hidden motive shows it by acting oddly, not by being annotated.
 HARD RULE: never state, name, or paraphrase the stakes the story runs on,
 nor any shared goal or reason two characters (or a character and the
 player) might want the same thing - even if such a thing is implied
-somewhere in what you were given. Show it only through behaviour the
-player can themselves notice and wonder about: a character who keeps
-returning to one place, a question asked more than once, a reaction that
-seems oversized for what just happened. Never write a sentence that
-resolves the wondering for the player - that is theirs to do, not yours.
+somewhere in what you were given. No character announces what the story is
+"really about"; no one says "this is what I really came for" or names the
+thing the whole scene has been circling. Show it only through behaviour the
+player can themselves notice
+and wonder about: a character who keeps returning to one place, a question
+asked more than once, a reaction that seems oversized for what just
+happened. Never write a sentence that resolves the wondering for the
+player - that is theirs to do, not yours. If it is not in an event, it was
+not said.
 
 --------------------------------------------------
 3. CAN THIS END
@@ -101,6 +132,18 @@ In the late scenes (the PHASE line says escalate), look honestly for the
 close: if the conflict that drove the story is resolved and the player has
 somewhere to walk away to, that is an ending - say true. In the early scenes
 it should almost always be false. The game stops at scene fifteen regardless.
+
+If the player has left the place the whole story was set in and cannot get
+back - walked out the door, gone down the mountain, driven off - that is an
+ending even if some thread is loose: the story followed the player, and the
+player is gone. Say true.
+
+Also say true if the story the start prompt set up is simply over - the
+question it posed has been answered, walked away from for good, or made
+moot by what has happened since - and the scene is now about something
+unrelated. A conversation that has clearly said everything it was going to
+say, a goodbye that is over, a task that is done or abandoned: that is the
+end, even if the last few minutes are messy.
 
 --------------------------------------------------
 4. THE IMAGE

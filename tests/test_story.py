@@ -284,6 +284,113 @@ class PhaseDirectorTest(GameTestCase):
         game.close()
 
 
+class NormalizeInputTest(GameTestCase):
+    """Die Spieler-Eingabe wird vor dem Ledger in die Ich-Perspektive
+    gebracht; woertliche Rede in "..." bleibt; das Ergebnis erreicht
+    RESOLVE und NARRATE."""
+
+    class _NormEngine(FakeEngine):
+        def __init__(self, text="Ich nehme das Radio", **kw):
+            super().__init__(**kw)
+            self._text = text
+            self.seen: dict[str, str] = {}
+
+        def structured(self, messages, model_cls, *, call="", retries=1):
+            self.calls.append(model_cls.__name__)
+            self.seen[model_cls.__name__] = messages[1]["content"]
+            if model_cls.__name__ == "Normalized":
+                return _reply(_fill(model_cls, {"text": self._text}))
+            return _reply(_fill(model_cls))
+
+    def test_fast_path_leaves_first_person_untouched(self):
+        engine = FakeEngine()
+        game = self._game(engine)
+        game.world = _world_with_agents("Vogel")
+        self.assertEqual(game._normalize_input("Ich nehme das Radio"),
+                         "Ich nehme das Radio")
+        self.assertNotIn("Normalized", engine.calls)
+        game.close()
+
+    def test_pure_quote_kept_verbatim(self):
+        game = self._game(FakeEngine())
+        game.world = _world_with_agents("Vogel")
+        self.assertEqual(game._normalize_input('"Hände hoch!"'), '"Hände hoch!"')
+        game.close()
+
+    def test_du_phrasing_is_rewritten_via_model(self):
+        engine = self._NormEngine("Ich nehme das Radio vom Tisch")
+        game = self._game(engine)
+        game.world = _world_with_agents("Vogel")
+        self.assertEqual(game._normalize_input("Du nimmst das Radio vom Tisch"),
+                         "Ich nehme das Radio vom Tisch")
+        game.close()
+
+    def test_normalized_text_reaches_resolve_and_narrate(self):
+        engine = self._NormEngine("Ich hebe das Radio auf")
+        game = self._game(engine)
+        game.world = _world_with_agents("Vogel")
+        game.advance("Nimm das Radio")
+        self.assertIn("Ich hebe das Radio auf", engine.seen["ResolvePlayer"])
+        self.assertIn("Ich hebe das Radio auf", engine.seen["Narrate"])
+        game.close()
+
+
+class DecidePlayerActionTest(GameTestCase):
+    """Die frische (normalisierte) Spieleraktion wird jeder co-lokierten
+    Figur in den DECIDE-Kontext gehaengt, damit sie darauf reagiert."""
+
+    def _run(self, npc_at):
+        seen = {}
+
+        class Capturing(FakeEngine):
+            def structured(self, messages, model_cls, *, call="", retries=1):
+                self.calls.append(model_cls.__name__)
+                if model_cls.__name__ == "Decide":
+                    seen["ctx"] = messages[1]["content"]
+                if model_cls.__name__ == "Normalized":
+                    return _reply(_fill(model_cls, {"text": "Ich sage Vogel Bescheid"}))
+                return _reply(_fill(model_cls))
+
+        game = self._game(Capturing())
+        game.world = _world_with_agents("Vogel")
+        game.world.characters["c1"].at = npc_at
+        game.advance('Vogel, geh zur Tür')
+        game.close()
+        return seen.get("ctx", "")
+
+    def test_block_present_when_co_located(self):
+        ctx = self._run("n1")            # Spieler @ n1, Vogel @ n1
+        self.assertIn("THIS ROUND THE PLAYER JUST DID / SAID", ctx)
+        self.assertIn("Ich sage Vogel Bescheid", ctx)
+
+    def test_block_absent_when_apart(self):
+        ctx = self._run("n2")            # Vogel @ n2, Spieler @ n1
+        self.assertNotIn("THIS ROUND THE PLAYER JUST DID", ctx)
+
+
+class StrandedEndingTest(GameTestCase):
+    """Hat der Spieler den Kernschauplatz ueber eine Einbahn verlassen und
+    ist scene_number >= MIN_SCENES, ist die Runde completed."""
+
+    def test_stranded_after_min_scenes_completes(self):
+        game = self._game(FakeEngine())
+        world = World(
+            language="en",
+            nodes={
+                "n1": Node(id="n1", name="Hut", anchor="stone",
+                           exits=[Exit(to="n2", one_way=True,
+                                       justification="the ledge broke")]),
+                "n2": Node(id="n2", name="Path", anchor="ice", exits=[]),
+            },
+            characters={}, facts=[], player_at="n2",
+            scene_number=story.MIN_SCENES,
+        )
+        game.world = world
+        beat = game.advance("keep walking")
+        self.assertTrue(beat.completed)
+        game.close()
+
+
 class QuotaNotbremseTest(GameTestCase):
     def test_mandatory_retry_stops_after_three_attempts_and_spawns_fallback(self):
         # scene_number=5 -> turn_number=6 > 5 -> MANDATORY; die Engine

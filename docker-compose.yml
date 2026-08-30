@@ -118,11 +118,17 @@ services:
       AIGAME_THINK: "1"
       # Fuer WELCHE Call-Typen der Denkprozess laeuft (nur wenn AIGAME_THINK=1).
       # Reasoning kostet ~2-4k Token/Call und dominiert die Rundenzeit. RESOLVE
-      # (Kollision, Scheitern, neue Raeume/Figuren) und INIT profitieren; DECIDE
-      # (4 kurze Felder) und NARRATE (Prosa) kaum. Bei schwaechelnden NPC-
-      # Entscheidungen "decide" ergaenzen, fuer maximale Qualitaet
-      # "init,resolve,decide,narrate", fuer maximales Tempo "" (nichts).
-      AIGAME_THINK_CALLS: "init,resolve"
+      # und INIT brauchen es (Kollision, Scheitern, neue Raeume/Figuren).
+      # NARRATE ist wieder drin: ohne Denken ERFINDET der Erzaehler Abschluesse,
+      # die im Delta nicht stehen (Playtest "Schneesturm": "wirfst dich hinunter
+      # in die Treppe", waehrend der Spieler laut State noch oben steht) - das
+      # erzeugt Narration/State-Desync, den der naechste Resolver ausbaden muss.
+      # DECIDE ist wieder drin: ohne Denken halluziniert eine aggressive Figur
+      # eine komplette falsche Backstory ueber eine ANDERE Figur (Playtest
+      # "Geschworener": Viktor erfand Elias' Tochter-OP, Versicherungsbetrug,
+      # Versteck) - und die Erfindung wird ueber Zitat-Events zum Kanon und
+      # verdraengt die Praemisse. Fuer maximales Tempo "".
+      AIGAME_THINK_CALLS: "init,resolve,decide,narrate"
       # Antwortbudget fuer Calls OHNE Denkprozess (DECIDE/NARRATE) - ein Delta
       # bzw. Erzaehltext ist klein, 24k (AIGAME_MAX_TOKENS) waeren nur ein
       # Runaway-Netz, das es ohne Reasoning kaum braucht.

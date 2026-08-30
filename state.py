@@ -61,6 +61,13 @@ RECENT_LIMIT = 3
 # der Ablehnungsliste fuers Debug-Log.
 MAX_EVENTS = 4
 
+# Wie viele Gegenstaende der Spieler oder eine Figur HOECHSTENS traegt. Ein
+# leichtes Modell gegen das Teleportieren von Objekten (Playtest "Geheimagent
+# im McDonald's": das Funkgeraet wanderte Tasche -> Tisch -> Kueche -> NPC ->
+# weg, ohne dass irgendein Feld es festhielt). item_moves im Resolve-Delta
+# verschiebt Objekte zwischen diesen Listen.
+INVENTORY_LIMIT = 3
+
 
 @dataclass
 class Exit:
@@ -105,6 +112,10 @@ class Character:
     # und beim Notanker (spawn_fallback_character).
     hidden_target: str = ""
     memory: list[str] = field(default_factory=list)
+    # Was diese Figur bei sich traegt (hoechstens INVENTORY_LIMIT). Wird ueber
+    # item_moves im Resolve-Delta gefuellt/geleert; in render_for() nur der
+    # Figur selbst gezeigt, in render() allen.
+    inventory: list[str] = field(default_factory=list)
 
 
 class RoundEntry(NamedTuple):
@@ -148,6 +159,17 @@ class World:
     # die er die ganze Zeit selbst wusste.
     scene_number: int = 0
     recent: list[str] = field(default_factory=list)
+    # Was der Spieler bei sich traegt (hoechstens INVENTORY_LIMIT) - das
+    # Gegenstueck zu Character.inventory. Es gibt kein Spieler-Objekt, deshalb
+    # ein eigenes Feld hier.
+    player_carries: list[str] = field(default_factory=list)
+    # Knoten, in denen der Spieler in einer FRUEHEREN Runde schon war (nach
+    # from_init: der Startraum). NARRATE bekommt daraus ein "erstes Mal hier"
+    # / "schon mal hier"-Signal (render_player_place), damit bestehende Raeume
+    # nicht jede Runde neu mit Luft/Licht/Geruch etabliert werden. Der aktuelle
+    # Ort kommt erst NACH erfolgreichem NARRATE dazu (story.Game.advance).
+    # Liste, keine Menge: asdict()/json.dumps im JSON-Log kann kein set.
+    visited: list[str] = field(default_factory=list)
     # Rundenzustand, KEINE Weltwahrheit - siehe copy(). Faengt bei jeder
     # Runde leer an und sammelt, was diese eine Runde an Events ausgeloest
     # hat, mitsamt der Spielerposition zum jeweiligen Zeitpunkt.
@@ -175,32 +197,64 @@ class World:
     def from_init(cls, init) -> World:
         """Aus dem validierten Init-Objekt eine lebende Welt bauen.
 
-        INIT liefert Sprache, den Startraum und 0-2 Figuren, die schon darin
-        stehen (das Spiel dreht sich um den Umgang mit ihnen - allein zu
-        starten ist die Ausnahme). Weitere Knoten und Figuren entstehen erst
-        waehrend des Spiels (World.add_node / _introduce_characters).
+        INIT liefert Sprache, die lokale Nachbarschaft (2-4 Raeume: der
+        Startraum plus jeder direkt verbundene, siehe schema.init_model) und
+        0-2 Figuren, die schon im Startraum stehen. Weiter entfernte Knoten
+        und spaetere Figuren entstehen erst waehrend des Spiels
+        (World.add_node / _introduce_characters).
 
         Die Startfiguren laufen durch dieselbe Maschinerie wie eine spaeter
         eingefuehrte Figur: _introduce_characters() vergibt die Ids, befoerdert
         die ersten MAX_AGENTIC Figuren zu agentischen und setzt je ihr
-        hidden_target. INIT kennt keine Knoten-Id, deshalb wird "n1" hier
-        ergaenzt.
+        hidden_target. INIT kennt keine Knoten-Id, deshalb werden n1..nk hier
+        in `nodes`-Reihenfolge vergeben (n1 = der Startraum).
         """
+        raw_nodes = list(getattr(init, "nodes", None) or [])
+        if not raw_nodes:
+            # Rueckfall auf die aeltere Init-Form (start_node_name/-anchor),
+            # damit alte Stubs/Fixtures nicht brechen.
+            raw_nodes = [types.SimpleNamespace(
+                name=getattr(init, "start_node_name", "Room"),
+                anchor=getattr(init, "start_node_anchor", ""))]
+
+        nodes: dict[str, Node] = {}
+        name_to_id: dict[str, str] = {}
+        for i, rn in enumerate(raw_nodes[:4], start=1):
+            nid = f"n{i}"
+            nodes[nid] = Node(id=nid, name=rn.name, anchor=rn.anchor, exits=[])
+            name_to_id.setdefault(rn.name, nid)
+
+        wired: set[frozenset] = set()
+        for link in getattr(init, "connections", None) or []:
+            a = name_to_id.get(getattr(link, "from_name", ""))
+            b = name_to_id.get(getattr(link, "to_name", ""))
+            if a is None or b is None or a == b:
+                continue                       # unbekannter Name / Selbstlink
+            pair = frozenset((a, b))
+            if pair in wired:
+                continue                       # Duplikat
+            if len(nodes[a].exits) >= 3 or len(nodes[b].exits) >= 3:
+                continue                       # 1-3 Verbindungen je Knoten
+            wired.add(pair)
+            nodes[a].exits.append(Exit(to=b, one_way=False, justification=""))
+            nodes[b].exits.append(Exit(to=a, one_way=False, justification=""))
+
         direction = getattr(init, "direction", None)
         world = cls(
             language=init.language,
-            nodes={"n1": Node(id="n1", name=init.start_node_name,
-                              anchor=init.start_node_anchor, exits=[])},
+            nodes=nodes,
             characters={},
             facts=[],
             player_at="n1",
+            visited=["n1"],
             pull=getattr(direction, "pull", "") or "",
             pressure=getattr(direction, "pressure", "") or "",
         )
         starters = [
             types.SimpleNamespace(name=c.name, at="n1",
                                   agenda_draft=c.agenda_draft,
-                                  agenda_target_hint=c.agenda_target_hint)
+                                  agenda_target_hint=c.agenda_target_hint,
+                                  carries=list(getattr(c, "carries", []) or []))
             for c in getattr(init, "starting_characters", [])
         ]
         world._introduce_characters(starters, [])
@@ -221,6 +275,42 @@ class World:
         """
         return tuple(c.id for c in self.characters.values()
                      if c.status == "active")
+
+    def resolvable_ids(self) -> tuple[str, ...]:
+        """Figuren, die ein Resolve-Delta REFERENZIEREN darf: aktive UND
+        ausgeschaltete, aber keine toten.
+
+        Eine disabled Figur kann nicht laufen (apply_turn lehnt moves weiter
+        ab), aber ein Kampf muss sie zu Ende bringen koennen (disabled ->
+        dead) oder sie sich erholen lassen (disabled -> active). Baute die
+        Grammatik nur aus active_ids(), waere eine ausgeschaltete Figur fuer
+        immer eingefroren - im Playtest "Schneesturm" lag Thomas so 7 Szenen
+        als stumme Requisite, weil sein Tod-Delta nie in die Grammatik passte.
+        """
+        return tuple(c.id for c in self.characters.values()
+                     if c.status != "dead")
+
+    def player_stranded(self) -> bool:
+        """Steht der Spieler in einem Raum, aus dem KEIN Weg zurueck zum
+        Startknoten n1 fuehrt?
+
+        Dann hat er den Kernschauplatz ueber eine Einbahn verlassen - "raus,
+        wo alles spielte, und kein Zurueck" ist ein legitimes Spielende
+        (story.advance wertet das zusammen mit MIN_SCENES aus). BFS ueber die
+        gerichteten Exits, kein Fund von "n1" -> gestrandet.
+        """
+        if self.player_at == "n1" or "n1" not in self.nodes:
+            return False
+        seen, stack = {self.player_at}, [self.player_at]
+        while stack:
+            node = stack.pop()
+            for nxt in self.exits_from(node):
+                if nxt == "n1":
+                    return False
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return True
 
     def agentic_count(self) -> int:
         """Wie viele agentische Slots belegt sind.
@@ -393,10 +483,25 @@ class World:
             lines.extend(f"  {mark}" for mark in node.marks)
             lines.append(f"  exits: {self._exit_text(node)}")
 
+        # Die EINE verlaessliche Quelle fuer "wer ist gerade wo". Die
+        # remembers:-Zeilen unten sind Vergangenheit ("fuhr zum Friedhof",
+        # "stieg aus") und sagen NICHTS ueber die aktuelle Position - das
+        # Modell hat das im Playtest wiederholt verwechselt.
+        lines.append("POSITIONS NOW (read positions ONLY here, never from "
+                     "events or memories):")
+        lines.append(f'  player: {self._place_name(self.player_at)}')
+        for char in self.characters.values():
+            if char.status != "dead":
+                lines.append(f"  {char.name}: {self._place_name(char.at)}")
+
         for char in self.characters.values():
             lines.append(self._char_line(char))
-            lines.extend(f"  remembers: {m}" for m in char.memory)
+            if char.inventory:
+                lines.append("  carries: " + ", ".join(char.inventory))
+            lines.extend(f"  did/heard earlier: {m}" for m in char.memory)
 
+        if self.player_carries:
+            lines.append("PLAYER CARRIES: " + " | ".join(self.player_carries))
         if self.facts:
             lines.append("FACTS: " + " | ".join(self.facts))
         lines.extend(self._direction_lines())
@@ -464,6 +569,9 @@ class World:
         lines.extend(f"  {mark}" for mark in node.marks)
         lines.append(f"  exits: {self._exit_text(node)}")
 
+        if char.inventory:
+            lines.append("YOU ARE CARRYING: " + ", ".join(char.inventory))
+
         # Andere Anwesende - nur Name, sonst nichts. Was jemand will, sieht
         # man ihm nicht an.
         others = [c for c in self.characters.values()
@@ -473,9 +581,18 @@ class World:
                          + ", ".join(f"{c.id} {c.name}" for c in others))
         if self.player_at == char.at:
             lines.append("THE PLAYER IS HERE")
+            if self.player_carries:
+                lines.append("THE PLAYER IS HOLDING: "
+                             + ", ".join(self.player_carries))
+        else:
+            lines.append("THE PLAYER IS NOT HERE")
 
         if char.memory:
-            lines.append("YOU REMEMBER:")
+            # Bewusst "happened earlier", nicht "remember": die Zeilen sind
+            # Vergangenheit ("player drove off", "got out of the car") und
+            # sagen NICHTS darueber, wo jetzt jemand steht - dafuer zaehlt nur
+            # YOU ARE AT / THE PLAYER IS (NOT) HERE oben.
+            lines.append("WHAT HAPPENED EARLIER (past - not where anyone is now):")
             lines.extend(f"  {m}" for m in char.memory)
 
         return "\n".join(lines)
@@ -494,8 +611,12 @@ class World:
         # Text, den er versehentlich abschreiben kann (und getan hat). Auch
         # die Ausgaenge nur als Anzahl + Einbahn-Begruendungen, nicht als
         # Id-Liste.
-        lines = [node.name, f"  {node.anchor}"]
+        seen = "YOU HAVE BEEN HERE BEFORE" if self.player_at in self.visited \
+            else "FIRST TIME IN THIS PLACE"
+        lines = [seen, node.name, f"  {node.anchor}"]
         lines.extend(f"  {mark}" for mark in node.marks)
+        if self.player_carries:
+            lines.append("  you are carrying: " + ", ".join(self.player_carries))
         if node.exits:
             oneways = [e.justification for e in node.exits
                        if e.one_way and e.justification]
@@ -574,14 +695,22 @@ class World:
                 parts.append(exit_.to)
         return " | ".join(parts) if parts else "none"
 
+    def _place_name(self, node_id: str) -> str:
+        """'Friedhof (n3)' - Name zuerst, Id in Klammern. Das Modell soll in
+        Klartext den Namen nutzen; die Id braucht es nur fuer die paar
+        Felder, die ein Literal verlangen."""
+        node = self.nodes.get(node_id)
+        return f'{node.name} ({node_id})' if node else node_id
+
     def _char_line(self, char: Character) -> str:
-        """"CHAR c1 Vogel @n3 active   wants: get the pump running | now: force the valve".
+        """"CHAR c1 Vogel @Cellar(n3) active   wants: ... | now: ...".
 
         agenda und aim stehen nur bei handlungsfaehigen Figuren - bei einer
         toten waeren sie bestenfalls verwirrend.
         """
         agentic = " agentic" if char.is_agentic else ""
-        line = f"CHAR {char.id} {char.name} @{char.at} {char.status}{agentic}"
+        line = (f"CHAR {char.id} {char.name} "
+                f"@{self._place_name(char.at)} {char.status}{agentic}")
         if char.status != "active":
             return line
         return f"{line}   wants: {char.agenda} | now: {char.aim}"
@@ -668,7 +797,13 @@ class World:
         # fliehen und danach zusammenbrechen. Umgekehrt waere die Flucht
         # abgelehnt worden, weil sie da schon nicht mehr aktiv gewesen waere.
         for change in delta.status_changes:
-            char = self.characters.get(change.character)
+            # Manche Modelle schreiben "c1 Thomas" statt "c1" ins Feld (die
+            # Grammatik SOLLTE nur die Id zulassen, aber ein Reparaturversuch
+            # kann daneben liegen). Den fuehrenden Id-Token nehmen, damit ein
+            # sonst gueltiger Zustandswechsel nicht an der Schreibweise
+            # scheitert (Playtest "Schneesturm": Thomas' Tod ging so verloren).
+            cid = change.character.split()[0] if change.character else ""
+            char = self.characters.get(cid)
             if char is None:
                 rejected.append(f"status {change.character}: unknown character")
             else:
@@ -743,6 +878,38 @@ class World:
             rejected.append(
                 f"events: {len(delta.events) - MAX_EVENTS} dropped, over MAX_EVENTS")
 
+        # --- Gegenstaende (Inventar) ---
+        # Ein Objekt liegt entweder in genau einer Inventarliste (Spieler oder
+        # eine Figur) oder ist ungetrackt (auf einem Moebel, im Raum). Jeder
+        # item_move nimmt es ueberall raus und legt es ans Ziel - "player",
+        # eine Figuren-Id, eine Knoten-Id (abgelegt, nicht mehr getragen) oder
+        # "gone" (zerstoert/verloren).
+        for im in getattr(delta, "item_moves", []):
+            item = im.item.strip()
+            if not item:
+                continue
+            low = item.lower()
+            self.player_carries[:] = [
+                x for x in self.player_carries if low not in x.lower()]
+            for c in self.characters.values():
+                c.inventory[:] = [
+                    x for x in c.inventory if low not in x.lower()]
+            if im.to in ("gone",) or im.to in self.nodes:
+                continue                       # nicht mehr getragen
+            if im.to == "player":
+                dest = self.player_carries
+            elif im.to in self.characters:
+                dest = self.characters[im.to].inventory
+            else:
+                rejected.append(f"item_move {item!r} -> {im.to}: no such holder")
+                continue
+            if len(dest) >= INVENTORY_LIMIT:
+                rejected.append(
+                    f"item_move {item!r} -> {im.to}: inventory full "
+                    f"({INVENTORY_LIMIT})")
+                continue
+            dest.append(item)
+
         return rejected
 
     def _introduce_characters(self, new_chars, rejected: list[str]) -> None:
@@ -766,6 +933,8 @@ class World:
             make_agentic = self.agentic_count() < self.max_agentic
             char_id = self.add_character(nc.name, nc.at, nc.agenda_draft,
                                          make_agentic)
+            self.characters[char_id].inventory = list(
+                getattr(nc, "carries", []) or [])[:INVENTORY_LIMIT]
             if make_agentic:
                 # agenda_target_hint ist bereits die knappe Nominalphrase
                 # (schema.py, NewCharacter) - direkt uebernommen.
