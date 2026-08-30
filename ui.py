@@ -54,6 +54,7 @@ import threading  # Nebenlaeufigkeit: mehrere Dinge gleichzeitig
 import tty  # Terminal in den "Raw"-Modus schalten (nur Linux/macOS!)
 
 import gpu
+import llm  # nur fuer llm.last_tokens_per_sec in der Fussleiste
 
 # ACHTUNG: termios und tty gibt es unter Windows nicht. Dieses Programm laeuft
 # im Linux-Container, deshalb ist das in Ordnung.
@@ -438,6 +439,12 @@ class Frame:
             # ":3d" = ganze Zahl auf drei Stellen rechtsbuendig, damit der
             # Wert beim Wechsel von 9 auf 10 nicht seitlich huepft.
             parts.append(f"GPU {self._bar(util / 100)} {util:3d}%")
+
+        # Generierungsrate der letzten Inferenz. Feste Breite wie beim GPU-
+        # Wert, damit die Zahl beim Wechsel nicht seitlich huepft. Steht als
+        # letztes Feld: _join() laesst es auf schmalem Terminal zuerst weg.
+        if llm.last_tokens_per_sec is not None:
+            parts.append(f"{llm.last_tokens_per_sec:4.0f} tok/s")
 
         return _join(parts, self._width())
 

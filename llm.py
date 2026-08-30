@@ -91,6 +91,20 @@ MAX_TOKENS = int(os.environ.get("AIGAME_MAX_TOKENS", "24576"))
 # und laesst die Erzaehlung immer noch lebendig genug.
 TEMPERATURE = float(os.environ.get("AIGAME_TEMPERATURE", "0.6"))
 
+# Zuletzt gemessene Generierungsrate (Tokens/Sekunde) der juengsten
+# complete()-Anfrage - nur fuer die Footer-Anzeige (ui.py liest das). None =
+# es lief noch keine Inferenz. structured() ruft complete() ggf. mehrfach
+# auf; jeder Aufruf ueberschreibt, der Footer zeigt also stets die letzte.
+last_tokens_per_sec: float | None = None
+
+
+def _record_rate(tokens: int | None, seconds: float | None) -> None:
+    """Rate ablegen, wenn beide Werte brauchbar sind - sonst unveraendert."""
+    global last_tokens_per_sec
+    if tokens and seconds and seconds > 0:
+        last_tokens_per_sec = tokens / seconds
+
+
 # Reasoning-Modus: manche Modelle koennen vor der Antwort "nachdenken".
 # Das kostet Zeit, verbessert aber oft die Konsistenz. Der Denktext landet
 # getrennt vom JSON und wandert nur ins Debug-Log.
@@ -448,6 +462,12 @@ class Ollama(LLM):
         if data.get("error"):
             raise RuntimeError(f"Ollama: {data['error']}")
 
+        # Ollama misst selbst: eval_count Tokens in eval_duration Nanosekunden
+        # (reine Generierung, ohne Prompt-Verarbeitung) - genauer als eine
+        # eigene Wall-Clock-Messung.
+        dur = data.get("eval_duration")
+        _record_rate(data.get("eval_count"), dur / 1e9 if dur else None)
+
         message = data.get("message", {})
         self.last_thinking = message.get("thinking") or ""
         content = self._split_thinking(message.get("content", "").strip())
@@ -743,11 +763,18 @@ class VLLM(LLM):
             }
         else:
             payload["response_format"] = {"type": "json_object"}
+        t0 = time.perf_counter()
         try:
             data = _json_post(VLLM_URL + "/v1/chat/completions", payload, timeout=600)
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace").strip()
             raise RuntimeError(f"vLLM: HTTP {e.code} - {detail[:300]}") from None
+
+        # vLLM liefert keine Timing-Felder - Wall-Clock ist die einzige Quelle.
+        # completion_tokens zaehlt auch die Reasoning-Tokens mit; als grober
+        # Durchsatzwert fuer die Fussleiste ist das genau richtig.
+        _record_rate((data.get("usage") or {}).get("completion_tokens"),
+                     time.perf_counter() - t0)
 
         # Hier ohne .get(): fehlt "choices", ist die Antwort so kaputt, dass
         # ein lauter Fehler ehrlicher ist als ein stiller Ersatzwert.
