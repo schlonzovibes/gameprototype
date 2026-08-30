@@ -86,18 +86,13 @@ def init_model() -> type[BaseModel]:
         model_config = STRICT
 
         pull: str = Field(
-            description="English, one clause, ABSTRACT. What everyone here - "
-                        "the player and the people present - is drawn "
-                        "toward: an object, a person, a place, or an outcome "
-                        "to force. State only the SHAPE of it, never the "
-                        "specific thing - play makes it concrete. Keep it "
-                        "broad enough that the rest of the game still has "
-                        "something to discover.")
+            description="English, one clause. What this story is being pulled "
+                        "toward - see THE DIRECTION in the prompt for how "
+                        "concrete or abstract to pitch it.")
         pressure: str = Field(
-            description="English, one clause, ABSTRACT, same level as pull. "
-                        "What makes the pull matter now and makes waiting a "
-                        "bad option: something closing in, a way out "
-                        "narrowing, a situation coming apart.")
+            description="English, one clause. What makes the pull matter now "
+                        "and makes standing still a bad option - see THE "
+                        "DIRECTION in the prompt.")
 
     class StartCharacter(BaseModel):
         model_config = STRICT
