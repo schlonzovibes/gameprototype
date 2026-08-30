@@ -57,17 +57,25 @@ For each:
 
     name             a real personal name, in the language of the start
                      prompt. Not "the guard", not "a clown" - a name.
-    agenda_draft     English, one sentence, physically checkable - what
-                     they want. It MUST run through the player: something
-                     only the player can give them, block, threaten, or set
-                     off. "he wants the player to hand over the case", not
-                     "he wants to leave town". Raw material - you will not
-                     see it again.
-    agenda_target_hint  English, one noun or short noun phrase: what the
-                     agenda points toward. Written so someone who never
-                     sees the agenda still understands what it is about.
+    agenda_draft     English, one sentence: the OUTCOME this person is
+                     pushing for, that the player can grant or deny. A state
+                     of the world, not an order to the player. "he wants the
+                     case in his hands" - NOT "he wants the player to hand
+                     over the case". "she wants the tin kept sealed until
+                     rescue" - NOT "she wants the player to block his reach".
+                     Physically checkable. Raw material - you will not see
+                     it again.
+    agenda_target_hint  English, one noun or short noun phrase: the thing
+                     the agenda is about. Two people who want opposite
+                     outcomes have DIFFERENT hints.
 
 No backstory, no psychology - physical and checkable, like the room.
+
+If the start prompt already says what a person wants (X wants to do this, Y
+wants to wait), use exactly that - do not swap it for a want about some
+object you invented. If you place two people, their agendas must differ:
+opposite outcomes that put the player in the middle, or the same outcome
+by methods that clash. Never the same want written twice.
 
 --------------------------------------------------
 4. THE DIRECTION
@@ -76,13 +84,23 @@ No backstory, no psychology - physical and checkable, like the room.
 Fix what this story is about - as a force in the room right now, not the
 player's long-term goal.
 
-direction.pull: the concrete thing being fought over or reached for HERE, in
-this scene - an object, a piece of ground, a person's cooperation, one
-decision that has to break one way or the other. Concrete enough that you
-could show it happening; open enough that it is not obvious yet how it goes.
-"the phone and what is on it", not "establishing a foothold". "who walks out
-of this room in control", not "gaining the group's trust". Never the
-player's private objective, never a future end-state.
+direction.pull: name the physical thing at the centre of this - an object
+someone wants, a door someone is trying to get through, a person whose
+answer decides everything, a body, a signature, a key. Something you could
+point a camera at. It must be a NOUN you could touch or a single yes/no that
+lands this scene - never a state of mind, never an outcome-in-the-future.
+
+  good: "the sealed envelope on the desk"   "whether she names a price"
+        "the last seat on the boat"          "the confession"
+  bad:  "the authority that comes from passing the test"
+        "establishing trust"   "control of the room"   "proving himself"
+
+If your pull contains words like trust, authority, respect, control,
+standing, proving, foothold, or "the test" - it is too abstract. Throw it
+out and name the concrete thing those abstractions are really about.
+
+The player's own goal (why they came, what they are undercover for) is NOT
+the pull - the pull is what the scene itself keeps circling back to.
 
 direction.pressure: the clock that is already running and that the people
 here can feel and act on. Something that gets worse if nothing happens.
@@ -106,8 +124,12 @@ Scene 1 is narration only.
 
 No player action has happened yet. Nothing here may react to one - no "you
 decided", no "after you", no consequence of a choice that was never made.
-Establish where the player stands, what can be seen from there, and anyone
-present - name them and show what they are doing, not what they want.
+Establish where the player stands, who is present - name them, show what
+they are doing - and the one thing in the room the scene turns on.
+
+Open on a person or on that one object, not on the room's mood. Do not spend
+a sentence on the air, the light, a hum, the smell, or the silence; the
+anchor already carries the setting. 60-120 words is plenty.
 
 Suggest, through what is described, at least one plausible way to move on
 - a doorway, a gap, a sound from somewhere unseen - WITHOUT it being an

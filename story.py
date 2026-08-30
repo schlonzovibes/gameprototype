@@ -127,8 +127,11 @@ _PHASE_NOTE = {
     "commit":   "Mid-game. Positions harden and choices start to cost. Do not "
                 "let the scene idle - move something.",
     "escalate": "Late game. Push open conflicts toward a break: someone acts, "
-                "something gives, a cost lands. Do not let a scene go quiet. "
-                "The game ends at scene 15 no matter what.",
+                "something gives, a cost lands. Escalation is PEOPLE pushing "
+                "harder and stakes rising - not the building turning hostile. "
+                "Do not add shaking floors, strobing lights, sirens, doors "
+                "sealing on their own. Do not let a scene go quiet. The game "
+                "ends at scene 15 no matter what.",
 }
 
 
@@ -466,7 +469,14 @@ class Game:
         steht und wie stark es zuspitzen soll. Geht NICHT an DECIDE.
         """
         p = _phase(turn)
-        return f"SCENE {turn} of {MAX_SCENES}\nPHASE {p}: {_PHASE_NOTE[p]}"
+        block = f"SCENE {turn} of {MAX_SCENES}\nPHASE {p}: {_PHASE_NOTE[p]}"
+        if turn >= MAX_SCENES - 2:
+            block += ("\nCLOSING: the game is almost out of scenes. If the "
+                      "thing this story was about has been settled - taken, "
+                      "given, signed, refused for good, destroyed - and no "
+                      "fresh open question has replaced it, this is the end: "
+                      "report can_end true.")
+        return block
 
     def _resolve(self, world: World, actor_id: str, actor_node: str,
                 mode: str, action_block: str, turn: int, direction: str = ""):
@@ -610,7 +620,10 @@ class Game:
         # Denkprozess (AIGAME_THINK_CALLS) wuerde sich sonst daran ausrichten
         # statt an der Spielsprache.
         lines = [f"GAME LANGUAGE: {world.language} - write the narrator text "
-                 f"in this language, nothing else.", "",
+                 f"ONLY in this language. No other language, no mixed scripts, "
+                 f"not a single foreign word. Second person, and keep the "
+                 f"same form of address the player used (du vs Sie, tu vs "
+                 f"vous, ...) for the whole game.", "",
                  self._director_block(turn), "",
                  f"YOUR PLACE:\n{world.render_player_place()}", ""]
         if visible_events:

@@ -25,6 +25,13 @@ conflicts toward a break - someone acts, something gives, a cost lands; you
 do not let this character's attempt fizzle into a stand-off that just
 repeats next round. In "setup" it can still be taking shape.
 
+Escalation is the PEOPLE - what they are willing to do to each other, what
+they put on the line. It is NOT the room: an ordinary room does not grow a
+locking iron door, an electrified floor, strobing lights, a shaking
+building, an alarm going off by itself. If the start prompt is not about
+such a place, keep the setting ordinary and let the pressure come from the
+characters.
+
 The character's decided intent: what they are trying to do, what they say,
 where they try to go - already decided by them, elsewhere, from their own
 limited view (their own room, their own agenda and aim, nothing more).
@@ -48,6 +55,13 @@ stronger, someone is faster. Decide, and write the decision into the delta.
 Do not stage a stand-off that resolves itself next round; that is how a game
 stops moving.
 
+Two characters who want compatible things do NOT fight each other. If they
+are both leaning on the player toward the same outcome, they work as a pair
+- one presses while the other cuts off a retreat, they finish each other's
+threats. Only stage a physical struggle BETWEEN two characters when their
+agendas genuinely pull opposite ways. Grabbing an ally's arm every round is
+noise.
+
 If this character's agenda is clearly satisfied by what happens here - they
 got the thing, the player did what they wanted - record that as a fact, so
 the character has to find a new reason to act rather than looping the same
@@ -70,12 +84,19 @@ this attempt is what makes them move.
 
 MARKS
 
-A mark is a structural change to a place that a stranger walking in later
-would notice and be able to read: a door forced, blood on the floor, a
-table overturned, a hole in the wall. Not fingerprints, not a dent in the
-dust, not a smell, not "a gap of personal space between two people" - that
-is not a trace on the room at all. Only real, lasting, physical damage or
-displacement. Most rounds leave no mark.
+A mark exists only if you can name it as one of these:
+  - a door or window that no longer opens or closes properly
+  - a fire, or the burn/soot it leaves
+  - a body, or a pool of blood on the floor
+  - something structural collapsed or smashed beyond use (a shelf down, a
+    table split, a chair in pieces)
+  - a hole in a wall, floor or ceiling
+
+If it is not one of those, marks_added is EMPTY. A gouge, a dent, a
+scratch, a smear, a stain, a chip, a crack, spilled drink, scattered
+cutlery, a knocked-over chair, a swept-up shattered glass - NONE of these
+are marks, however deep or fresh you would describe them. A whole violent
+game might leave one or two real marks. When in doubt: empty.
 
 EVENTS
 
@@ -109,6 +130,19 @@ in an event.
 CONDITION
 
 Do not reach for status changes lightly, and never reverse one silently.
+
+FACTS
+
+A fact is a permanent change to the whole situation that cannot be seen at
+one place - "the power is out across the building", "the deal is off", "the
+train has left". Rare: maybe one every few rounds, often none.
+
+A fact is NOT a running commentary on a character's mood or wants. "He is
+growing impatient", "he demands the box", "he refuses to talk" - none of
+those are facts; his agenda already carries that, and repeating it in
+five slightly different sentences just bloats the state. Before you add a
+fact, check the existing list: if it says the same thing in other words,
+add nothing.
 
 --------------------------------------------------
 4. NEW ROOMS

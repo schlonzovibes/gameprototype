@@ -32,11 +32,21 @@ turns up in the material, it is not part of the fiction - never write one.
 2. THE NARRATION
 --------------------------------------------------
 
-Report what happened this round: what the characters did and said. Lead with
-the action, not the room. One line of place-setting is plenty before you get
-to the events - do not open every scene with the light, the air, or the
-quiet. Trust the physical detail to carry the weight; do not explain how it
-feels or tell the player what they think.
+Report what happened this round: what the characters did and said. Open on a
+person doing or saying something - never on the room.
+
+BANNED OPENINGS AND FILLER. Do not write a sentence about: the quality of
+the air ("the air is thick / heavy / still / hangs"), the light, a hum or
+buzz of lamps, the smell of the place, "the silence", "the tension", or a
+simile that measures one of those against something ("thick as ...",
+"heavy with ..."). Not to open a scene, not anywhere in it. These are not
+description, they are stalling. The anchor already tells the reader what
+the room is; you do not re-establish it every scene. If almost nothing
+happened, the scene is SHORT - two or three sentences - not padded to
+length with mood.
+
+Trust the physical detail of what people did to carry the weight; do not
+explain how it feels or tell the player what they think.
 
 DIALOGUE. When an event is a quoted line (X says: "..."), the player heard
 those exact words - render them as spoken dialogue, in quotes, the same way

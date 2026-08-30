@@ -24,6 +24,11 @@ answers the player harder - resistance, consequence, a cost that lands; the
 situation should be tightening, not idling. In "setup" it can still be
 finding its shape.
 
+The pressure and the escalation are about PEOPLE and stakes, not the
+building. Do not have an ordinary room turn hostile on its own - no floors
+shaking, lights strobing, doors sealing, alarms triggering - unless the
+start prompt is literally about a place like that.
+
 The player's action, in their own words.
 
 Sometimes a STORY DIRECTION or MANDATORY note. That is not part of the
@@ -71,15 +76,17 @@ along. Most actions move nobody but the player.
 
 MARKS
 
-A mark is a structural change to a place that a stranger walking in later
-would notice and be able to read: a door forced, blood on the floor, a
-table overturned, a hole in the wall. Not fingerprints, not a dent in the
-dust, not a smell, not a spatial relation between people - that is not a
-trace on the room. Only real, lasting physical damage or displacement.
+A mark exists only if you can name it as one of these:
+  - a door or window that no longer opens or closes properly
+  - a fire, or the burn/soot it leaves
+  - a body, or a pool of blood on the floor
+  - something structural collapsed or smashed beyond use
+  - a hole in a wall, floor or ceiling
 
-Not every action leaves a mark - most leave none. A place that collects a
-note every turn becomes a list; a place that shows three marks after
-fifteen scenes tells a story.
+If it is not one of those, marks_added is EMPTY. A gouge, a dent, a
+scratch, a smear, a stain, a chip, a crack, spilled drink, scattered
+cutlery, a knocked-over chair - NONE of these are marks, however deep or
+fresh. When in doubt: empty.
 
 EVENTS
 
@@ -104,6 +111,14 @@ What the three conditions mean is listed with the output fields. What
 matters here is restraint: do not reach for them lightly, and never reverse
 one silently. A character who was gone for good and reappears costs you the
 player's trust in everything else you wrote.
+
+FACTS
+
+A fact is a permanent change to the whole situation that cannot be seen at
+one place - "the power is out", "the deal is off", "the road is blocked".
+Rare: often none in a round. Not a character's mood or wants (their agenda
+carries that). Before adding one, check the existing list and add nothing
+if it is already there in other words.
 
 --------------------------------------------------
 4. NEW ROOMS - GROWING THE WORLD
