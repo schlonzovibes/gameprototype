@@ -252,6 +252,38 @@ class NarrateFailureTest(GameTestCase):
         game.close()
 
 
+class PhaseDirectorTest(GameTestCase):
+    """Der Phasen-Regieblock (Szenenzahl + setup/commit/escalate) geht an
+    RESOLVE (beide Modi) und NARRATE - aber NICHT an DECIDE."""
+
+    def test_phase_boundaries(self):
+        self.assertEqual(
+            [story._phase(t) for t in (1, 4, 5, 9, 10, 15, 99)],
+            ["setup", "setup", "commit", "commit", "escalate", "escalate",
+             "escalate"])
+
+    def test_block_reaches_resolve_and_narrate_not_decide(self):
+        seen = {}
+
+        class Capturing(FakeEngine):
+            def structured(self, messages, model_cls, *, call="", retries=1):
+                seen[model_cls.__name__] = messages[1]["content"]
+                return _reply(_fill(model_cls))
+
+        game = self._game(Capturing())
+        game.world = _world_with_agents("Vogel")
+        game.world.scene_number = 10          # -> turn 11 -> escalate
+
+        game.advance("wait")
+
+        for kind in ("ResolvePlayer", "ResolveAgentic", "Narrate"):
+            self.assertIn("SCENE 11 of 15", seen[kind], kind)
+            self.assertIn("PHASE escalate", seen[kind], kind)
+        self.assertNotIn("PHASE", seen["Decide"])
+        self.assertNotIn("SCENE 11", seen["Decide"])
+        game.close()
+
+
 class QuotaNotbremseTest(GameTestCase):
     def test_mandatory_retry_stops_after_three_attempts_and_spawns_fallback(self):
         # scene_number=5 -> turn_number=6 > 5 -> MANDATORY; die Engine

@@ -117,6 +117,24 @@ MAX_SCENES = 15
 # als Spiel wertlos.
 MIN_SCENES = 8
 
+# Spannungsphase aus dem Rundenzaehler (Design-Doc §6/§8). Reine Arithmetik
+# auf der Szene, kein Modellzugriff. Wird als Regieblock an RESOLVE und
+# NARRATE gehaengt (siehe _director_block) - NICHT an DECIDE: die Figur soll
+# die Meta-Uhr nicht "wissen". Die Grenzen sind an MAX_SCENES=15 ausgerichtet.
+_PHASE_NOTE = {
+    "setup":    "Early scene. Establish who wants what and let the situation "
+                "take shape; you do not need a hard turn yet.",
+    "commit":   "Mid-game. Positions harden and choices start to cost. Do not "
+                "let the scene idle - move something.",
+    "escalate": "Late game. Push open conflicts toward a break: someone acts, "
+                "something gives, a cost lands. Do not let a scene go quiet. "
+                "The game ends at scene 15 no matter what.",
+}
+
+
+def _phase(turn: int) -> str:
+    return "setup" if turn <= 4 else "commit" if turn <= 9 else "escalate"
+
 # Wie viele DECIDE-Aufrufe der agentischen Figuren einer Runde gleichzeitig
 # gegen vLLM laufen duerfen (_decide_all). Die Aufrufe sind unabhaengig -
 # jeder liest nur world.render_for(seine Figur), keiner mutiert etwas
@@ -331,7 +349,7 @@ class Game:
             try:
                 delta_p = self._resolve(
                     world, actor_id="player", actor_node=world.player_at,
-                    mode="player",
+                    mode="player", turn=turn_number,
                     action_block=self._resolve_block_player(player_input),
                     direction=direction)
             except Exception as e:
@@ -387,7 +405,7 @@ class Game:
                 try:
                     delta_n = self._resolve(
                         world, actor_id=npc.id, actor_node=npc.at,
-                        mode="agentic",
+                        mode="agentic", turn=turn_number,
                         action_block=self._resolve_block_npc(npc, decision))
                     log += world.apply_turn(npc.id, delta_n)
                 except Exception as e:
@@ -400,7 +418,7 @@ class Game:
 
         # --- 3. Erzaehlen ---
         try:
-            narrate = self._narrate(world, player_input)
+            narrate = self._narrate(world, player_input, turn=turn_number)
         except Exception as e:
             self._log_thinking(getattr(e, "thinking", ""), "narrate")
             raise SceneError(str(e)) from e
@@ -440,8 +458,18 @@ class Game:
 
     # ------------------------------------------------------------ intern
 
+    def _director_block(self, turn: int) -> str:
+        """Regieblock fuer RESOLVE und NARRATE: Szenenzahl + Spannungsphase.
+
+        Kein Teil der Fiktion - eine Produktionsnotiz des Clients (wie der
+        Quote-Regiehinweis), damit das Modell weiss, wo in den 15 Szenen es
+        steht und wie stark es zuspitzen soll. Geht NICHT an DECIDE.
+        """
+        p = _phase(turn)
+        return f"SCENE {turn} of {MAX_SCENES}\nPHASE {p}: {_PHASE_NOTE[p]}"
+
     def _resolve(self, world: World, actor_id: str, actor_node: str,
-                mode: str, action_block: str, direction: str = ""):
+                mode: str, action_block: str, turn: int, direction: str = ""):
         """EINEN Akteurzug (Spieler oder die agentische Figur) zu einem
         Delta aufloesen.
 
@@ -451,12 +479,12 @@ class Game:
         oder Raeume erzeugt haben - die Grammatik des agentischen Zuges muss
         das schon sehen).
 
+        turn ist die laufende Rundennummer (fuer den Phasen-Regieblock).
         direction ist der optionale STORY-DIRECTION/MANDATORY-Regiehinweis
-        (siehe advance()) - nur bei mode="player" jemals nicht-leer. Wird
-        GETRENNT vom Weltzustand geloggt (nicht nur als Teil des user-
-        Blocks): sonst liesse sich spaeter nicht mehr unterscheiden, was
-        das Modell aus der Welt wusste und was ihm der Client zugefluestert
-        hat.
+        (siehe advance()) - nur bei mode="player" jemals nicht-leer. Beide
+        Regieblocks werden GETRENNT vom Weltzustand geloggt: sonst liesse
+        sich spaeter nicht mehr unterscheiden, was das Modell aus der Welt
+        wusste und was ihm der Client zugefluestert hat.
         """
         resolve_cls = schema.resolve_model(
             world.node_ids(), world.active_ids(), world.exits_from(actor_node),
@@ -465,9 +493,12 @@ class Game:
         prompt_file = "resolve_player.txt" if mode == "player" else "resolve_agentic.txt"
         system = self._system(self.prompts[prompt_file], resolve_cls)
 
+        phase_block = self._director_block(turn)
         direction_block = f"{direction}\n\n" if direction else ""
-        user = f"WORLD STATE:\n{world.render()}\n\n{direction_block}{action_block}"
+        user = (f"{phase_block}\n\nWORLD STATE:\n{world.render()}\n\n"
+                f"{direction_block}{action_block}")
 
+        self._log_block(f"RESOLVE {actor_id} / phase", phase_block)
         if direction:
             self._log_block(f"RESOLVE {actor_id} / story direction", direction)
         self._log_block(f"RESOLVE {actor_id} / user", user)
@@ -560,7 +591,7 @@ class Game:
                         reply.value.model_dump_json(indent=2))
         return reply.value
 
-    def _narrate(self, world: World, player_input: str):
+    def _narrate(self, world: World, player_input: str, turn: int):
         """Aus den fuer den Spieler SICHTBAREN Ereignissen dieser Runde eine
         Szene machen.
 
@@ -580,6 +611,7 @@ class Game:
         # statt an der Spielsprache.
         lines = [f"GAME LANGUAGE: {world.language} - write the narrator text "
                  f"in this language, nothing else.", "",
+                 self._director_block(turn), "",
                  f"YOUR PLACE:\n{world.render_player_place()}", ""]
         if visible_events:
             lines.append("WHAT HAPPENED HERE THIS ROUND:")
