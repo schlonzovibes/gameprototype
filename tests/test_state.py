@@ -183,7 +183,7 @@ class FromInitTest(unittest.TestCase):
         self.assertEqual(world.pull, "a way off this floor")
         self.assertEqual(world.pressure, "the water keeps rising")
 
-    def test_starting_characters_land_in_n1_first_is_agentic(self):
+    def test_starting_characters_land_in_n1_and_are_agentic(self):
         world = World.from_init(_init_stub(starting_characters=[
             types.SimpleNamespace(name="Rae", agenda_draft="rob the player",
                                   agenda_target_hint="the register"),
@@ -192,8 +192,11 @@ class FromInitTest(unittest.TestCase):
         ]))
         self.assertEqual([c.name for c in world.characters.values()], ["Rae", "Bo"])
         self.assertTrue(all(c.at == "n1" for c in world.characters.values()))
-        self.assertIsNotNone(world.agentic_char_id)
-        self.assertEqual(world.characters[world.agentic_char_id].name, "Rae")
+        # Bis MAX_AGENTIC werden alle eingefuehrten Figuren agentisch, in
+        # Spawn-Reihenfolge; jede mit ihrem eigenen hidden_target.
+        self.assertEqual([c.name for c in world.agentic_actors()], ["Rae", "Bo"])
+        self.assertEqual(world.characters["c1"].hidden_target, "the register")
+        self.assertEqual(world.characters["c2"].hidden_target, "the door")
         self.assertEqual(world.character_quota_status(6), "")   # Quote erfuellt
 
 
@@ -232,14 +235,28 @@ class CanGrowTest(unittest.TestCase):
 
 
 class AddCharacterTest(unittest.TestCase):
-    """Kriterium D: add_character() mit is_agentic=True bei bereits
-    gesetztem agentic_char_id wirft."""
+    """add_character() laesst bis max_agentic agentische Figuren zu und
+    wirft erst beim Ueberschreiten."""
 
-    def test_second_agentic_character_raises(self):
+    def test_agentic_allowed_up_to_max_and_then_raises(self):
         world = _world()
+        world.max_agentic = 2
         world.add_character("Vogel", "n1", "get out", is_agentic=True)
+        world.add_character("Renner", "n1", "hide", is_agentic=True)   # noch ok
+        self.assertEqual(world.agentic_count(), 2)
         with self.assertRaises(ValueError):
-            world.add_character("Renner", "n1", "hide", is_agentic=True)
+            world.add_character("Dritter", "n1", "watch", is_agentic=True)
+
+    def test_dead_agentic_frees_a_slot(self):
+        world = _world()
+        world.max_agentic = 1
+        vid = world.add_character("Vogel", "n1", "get out", is_agentic=True)
+        # Vogel stirbt -> is_agentic wird False (apply_turn), Slot frei
+        world.apply_turn("player", _delta(status_changes=[
+            types.SimpleNamespace(character=vid, status="dead")]))
+        self.assertEqual(world.agentic_count(), 0)
+        rid = world.add_character("Renner", "n1", "hide", is_agentic=True)
+        self.assertTrue(world.characters[rid].is_agentic)   # rueckt nach
 
     def test_new_character_aim_starts_empty(self):
         world = _world()
@@ -273,14 +290,14 @@ class CharacterQuotaStatusTest(unittest.TestCase):
 
 
 class RenderForHiddenAimTest(unittest.TestCase):
-    """Kriterium G: render_for() enthaelt die "HIDDEN AIM"-Zeile NUR fuer
-    die agentische Figur."""
+    """render_for() enthaelt die "HIDDEN AIM"-Zeile NUR fuer eine agentische
+    Figur mit gesetztem hidden_target, und nur in DEREN Kontext."""
 
     def test_hidden_aim_only_for_agentic(self):
         world = _world()
         agentic_id = world.add_character("Vogel", "n1", "get out", True)
         other_id = world.add_character("Renner", "n1", "hide", False)
-        world.shared_target = "the ledger"
+        world.characters[agentic_id].hidden_target = "the ledger"
 
         out_agentic = world.render_for(world.characters[agentic_id])
         out_other = world.render_for(world.characters[other_id])
@@ -290,15 +307,29 @@ class RenderForHiddenAimTest(unittest.TestCase):
         self.assertNotIn("HIDDEN AIM", out_other)
         self.assertNotIn("the ledger", out_other)
 
-
-class RenderNeverLeaksSharedTargetTest(unittest.TestCase):
-    """Kriterium H: render() (voller Zustand) enthaelt shared_target an
-    keiner Stelle."""
-
-    def test_render_excludes_shared_target(self):
+    def test_each_agentic_char_sees_only_its_own_hidden_target(self):
         world = _world()
-        world.add_character("Vogel", "n1", "get out", True)
-        world.shared_target = "the ledger"
+        a = world.add_character("Vogel", "n1", "get out", True)
+        b = world.add_character("Renner", "n1", "hide", True)
+        world.characters[a].hidden_target = "the ledger"
+        world.characters[b].hidden_target = "the back door"
+
+        out_a = world.render_for(world.characters[a])
+        out_b = world.render_for(world.characters[b])
+        self.assertIn("the ledger", out_a)
+        self.assertNotIn("the back door", out_a)
+        self.assertIn("the back door", out_b)
+        self.assertNotIn("the ledger", out_b)
+
+
+class RenderNeverLeaksHiddenTargetTest(unittest.TestCase):
+    """render() (voller Zustand, geht an RESOLVE + Spieler-Kontext) enthaelt
+    ein hidden_target an keiner Stelle - nur render_for() der Figur selbst."""
+
+    def test_render_excludes_hidden_target(self):
+        world = _world()
+        cid = world.add_character("Vogel", "n1", "get out", True)
+        world.characters[cid].hidden_target = "the ledger"
         self.assertNotIn("the ledger", world.render())
 
 
@@ -330,11 +361,11 @@ class StoryDirectionVisibilityTest(unittest.TestCase):
 
     def test_leak_check_catches_pull_and_pressure(self):
         world = self._world_with_direction()
-        self.assertTrue(world.hidden_target_leaked(
+        self.assertTrue(world.secret_leaked(
             "You claw for a way off this floor as it groans."))
-        self.assertTrue(world.hidden_target_leaked(
+        self.assertTrue(world.secret_leaked(
             "The water keeps rising past your knees."))
-        self.assertFalse(world.hidden_target_leaked("The room is quiet."))
+        self.assertFalse(world.secret_leaked("The room is quiet."))
 
 
 class NewRoomMechanicsTest(unittest.TestCase):
@@ -362,31 +393,36 @@ class NewRoomMechanicsTest(unittest.TestCase):
         self.assertTrue(any("max_nodes" in r for r in rejected), rejected)
 
 
-class AgenticSelectionTest(unittest.TestCase):
-    """Sind mehrere Kandidaten gleichzeitig eingefuehrt und es gibt noch
-    keine agentische Figur, gewinnt der, dessen agenda_target_hint zu etwas
-    bereits Existierendem passt."""
+class AgenticPromotionTest(unittest.TestCase):
+    """Eingefuehrte Figuren werden in Spawn-Reihenfolge agentisch, bis
+    max_agentic voll ist - kein Vorsortieren, kein Modell-Urteil. Jede
+    beförderte bekommt ihr eigenes hidden_target."""
 
-    def test_agentic_selected_by_hint_match(self):
-        world = World(language="en",
-                      nodes={"n1": Node(id="n1", name="Docks",
-                                        anchor="wet planks", exits=[])},
-                      characters={}, facts=[], player_at="n1")
-        world.add_character("A", "n1", "x", False)
-        world.add_character("B", "n1", "x", False)   # jetzt 2 Figuren
-
-        sailor = types.SimpleNamespace(name="Sailor", at="n1",
-                                       agenda_draft="wants the ship",
-                                       agenda_target_hint="docks")
+    def test_all_introduced_get_promoted_in_order(self):
+        world = _world()   # noch keine Figur agentisch
         cook = types.SimpleNamespace(name="Cook", at="n1",
                                      agenda_draft="wants food",
                                      agenda_target_hint="soup")
-        delta = _delta(characters_introduced=[cook, sailor])   # cook zuerst!
-        world.apply_turn("player", delta)
+        sailor = types.SimpleNamespace(name="Sailor", at="n1",
+                                       agenda_draft="wants the ship",
+                                       agenda_target_hint="docks")
+        world.apply_turn("player", _delta(characters_introduced=[cook, sailor]))
 
-        agentic = world.characters[world.agentic_char_id]
-        self.assertEqual(agentic.name, "Sailor")
-        self.assertEqual(world.shared_target, "docks")
+        agents = world.agentic_actors()
+        self.assertEqual([c.name for c in agents], ["Cook", "Sailor"])
+        self.assertEqual(agents[0].hidden_target, "soup")
+        self.assertEqual(agents[1].hidden_target, "docks")
+
+    def test_promotion_stops_at_max_agentic(self):
+        world = _world()
+        world.max_agentic = 1
+        a = types.SimpleNamespace(name="A", at="n1", agenda_draft="x",
+                                  agenda_target_hint="one")
+        b = types.SimpleNamespace(name="B", at="n1", agenda_draft="x",
+                                  agenda_target_hint="two")
+        world.apply_turn("player", _delta(characters_introduced=[a, b]))
+        self.assertEqual([c.name for c in world.agentic_actors()], ["A"])
+        self.assertFalse(list(world.characters.values())[-1].is_agentic)  # B
 
 
 class SpawnFallbackCharacterTest(unittest.TestCase):
@@ -394,8 +430,15 @@ class SpawnFallbackCharacterTest(unittest.TestCase):
         world = _world()
         char_id = world.spawn_fallback_character(["Vale", "Marrow"])
         self.assertEqual(world.characters[char_id].name, "Vale")
-        self.assertEqual(world.agentic_char_id, char_id)
-        self.assertEqual(world.shared_target, "")
+        self.assertTrue(world.characters[char_id].is_agentic)
+        self.assertEqual(world.characters[char_id].hidden_target, "")
+
+    def test_no_promotion_when_agentic_pool_is_full(self):
+        world = _world()
+        world.max_agentic = 1
+        world.add_character("Vogel", "n1", "get out", is_agentic=True)
+        char_id = world.spawn_fallback_character(["Vale"])
+        self.assertFalse(world.characters[char_id].is_agentic)
 
 
 if __name__ == "__main__":

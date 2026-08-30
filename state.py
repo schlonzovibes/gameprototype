@@ -32,6 +32,7 @@ statt still zu passieren.
 from __future__ import annotations
 
 import copy
+import os
 import types
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -40,6 +41,14 @@ from typing import NamedTuple
 # JEDEM Aufruf komplett mitgeschickt wird - eine unbegrenzte Liste liesse
 # den Kontext mit jeder Szene wachsen.
 MEMORY_LIMIT = 8
+
+# Wie viele Figuren HOECHSTENS eigene DECIDE/RESOLVE-Zuege bekommen (Design-Doc
+# §7). Die ersten so vielen eingefuehrten Figuren werden agentisch, spaeter
+# eingefuehrte nicht mehr - ihr Verhalten faellt dann in NARRATE. story.py
+# faechert die DECIDE-Aufrufe dieser Figuren parallel gegen vLLM; bei einer
+# Runde mit regelmaessig >4 Agenten sollte --max-num-seqs entsprechend hoch
+# stehen (siehe story.LLM_CONCURRENCY).
+MAX_AGENTIC = int(os.environ.get("AIGAME_MAX_AGENTIC", "4"))
 
 # Wie viele fruehere Narrationen im Zustand bleiben. Sie ersetzen die
 # assistant-Turns des alten Chatverlaufs und dienen allein der stilistischen
@@ -85,9 +94,16 @@ class Character:
     agenda: str
     aim: str
     status: str = "active"
-    # Genau eine Figur im ganzen Spiel darf True sein - World.add_character()
-    # erzwingt das (wirft, wuerde eine zweite agentische Figur entstehen).
+    # Hoechstens MAX_AGENTIC Figuren duerfen True sein - World.add_character()
+    # erzwingt das. Eine agentische Figur bekommt pro Runde einen eigenen
+    # DECIDE/RESOLVE-Zug; die Reihenfolge ergibt sich aus der Einfuege-
+    # reihenfolge von World.characters (= Spawn-Reihenfolge).
     is_agentic: bool = False
+    # Das pro-Figur verborgene Ziel (aus agenda_target_hint): woraufhin diese
+    # Figur zieht, ohne es je auszusprechen. Nur in render_for() DIESER Figur
+    # sichtbar, nie in render()/NARRATE. Leer bei nicht-agentischen Figuren
+    # und beim Notanker (spawn_fallback_character).
+    hidden_target: str = ""
     memory: list[str] = field(default_factory=list)
 
 
@@ -141,20 +157,17 @@ class World:
     # davon bewegt sich der Spieler nur noch in der bestehenden Topologie,
     # damit Handlung durch Wiederkehr statt endloses Wachstum entsteht.
     max_nodes: int = 12
-    # Das verborgene, gemeinsame Ziel von Spieler und agentischem NPC - lebt
-    # NUR hier und in render_for() der agentischen Figur, NIE in render()
-    # oder im Kontext von RESOLVE(actor=player)/NARRATE als Wortlaut.
-    shared_target: str | None = None
     # Die abstrakte Richtung der Geschichte, bei INIT gesetzt: pull = worauf
     # alle zugezogen werden, pressure = was draengt. Zieht Spieler UND
     # Figuren von Anfang an in eine Richtung; wird durch die Handlungen im
     # Verlauf konkret. Geht an RESOLVE und DECIDE (render/render_for), NIE
-    # an NARRATE im Wortlaut - hidden_target_leaked() prueft das mit.
+    # an NARRATE im Wortlaut - secret_leaked() prueft das mit.
     pull: str = ""
     pressure: str = ""
-    # Id der EINEN agentischen Figur im ganzen Spiel, oder None, solange
-    # noch keine bestimmt wurde.
-    agentic_char_id: str | None = None
+    # Obergrenze fuer agentische Figuren (siehe Character.is_agentic /
+    # MAX_AGENTIC). Als Feld statt nur als Konstante, damit ein Testfall sie
+    # gezielt hochsetzen kann.
+    max_agentic: int = field(default_factory=lambda: MAX_AGENTIC)
 
     # ------------------------------------------------------------ Aufbau
 
@@ -168,9 +181,10 @@ class World:
         waehrend des Spiels (World.add_node / _introduce_characters).
 
         Die Startfiguren laufen durch dieselbe Maschinerie wie eine spaeter
-        eingefuehrte Figur: _introduce_characters() vergibt die Ids, waehlt
-        die agentische Figur (die erste ueberhaupt) und setzt shared_target.
-        INIT kennt keine Knoten-Id, deshalb wird "n1" hier ergaenzt.
+        eingefuehrte Figur: _introduce_characters() vergibt die Ids, befoerdert
+        die ersten MAX_AGENTIC Figuren zu agentischen und setzt je ihr
+        hidden_target. INIT kennt keine Knoten-Id, deshalb wird "n1" hier
+        ergaenzt.
         """
         direction = getattr(init, "direction", None)
         world = cls(
@@ -207,6 +221,29 @@ class World:
         """
         return tuple(c.id for c in self.characters.values()
                      if c.status == "active")
+
+    def agentic_count(self) -> int:
+        """Wie viele agentische Slots belegt sind.
+
+        Tote geben ihren Slot frei (apply_turn setzt is_agentic beim Tod auf
+        False, siehe dort) - eine spaeter eingefuehrte Figur kann dann
+        nachruecken. Disabled zaehlt weiter: eine ausgeschaltete Figur kann
+        sich erholen, dann waere der Slot sonst ueberbelegt.
+        """
+        return sum(1 for c in self.characters.values() if c.is_agentic)
+
+    def agentic_actors(self) -> list[Character]:
+        """Die AKTIVEN agentischen Figuren in Zug-Reihenfolge (= Spawn-
+        Reihenfolge, weil dict die Einfuegereihenfolge haelt).
+
+        story.Game.advance() geht diese Liste pro Runde durch: je Figur ein
+        DECIDE (parallel gefaechert) und danach ein RESOLVE (seriell, damit
+        Figur N+1 das angewandte Delta von Figur N schon sieht). Disabled/tote
+        Figuren fallen raus - ein toter NPC ist zudem schon nicht mehr
+        is_agentic.
+        """
+        return [c for c in self.characters.values()
+                if c.is_agentic and c.status == "active"]
 
     def perceivers(self, node_id: str) -> list[Character]:
         """Wer an diesem Ort etwas wahrnehmen koennte - das gesamte
@@ -265,16 +302,16 @@ class World:
                       is_agentic: bool) -> str:
         """Eine neue Figur anlegen, vergibt die naechste freie Id (c1, c2, ...).
 
-        Wirft, wenn is_agentic=True verlangt wird, obwohl schon eine
-        agentische Figur existiert - das darf laut Spielregel (genau EIN
-        agentischer NPC pro Spiel) nie vorkommen und ist ein
-        Programmierfehler des Aufrufers, kein Spielereignis, das man
-        stillschweigend korrigieren sollte.
+        Wirft, wenn is_agentic=True verlangt wird, obwohl schon max_agentic
+        agentische Figuren existieren - der Aufrufer (_introduce_characters /
+        spawn_fallback_character) prueft das selbst und uebergibt dann False;
+        kommt hier trotzdem True an, ist es sein Programmierfehler, kein
+        Spielereignis zum stillschweigenden Korrigieren.
         """
-        if is_agentic and self.agentic_char_id is not None:
+        if is_agentic and self.agentic_count() >= self.max_agentic:
             raise ValueError(
-                "agentic_char_id already set - only one agentic character "
-                "is allowed per game")
+                f"already at max_agentic ({self.max_agentic}) agentic "
+                f"characters")
         char_id = f"c{len(self.characters) + 1}"
         # aim startet leer - die Figur setzt ihren ersten Schritt selbst im
         # naechsten DECIDE-Aufruf (render_for() zeigt dafuer einen
@@ -282,8 +319,6 @@ class World:
         self.characters[char_id] = Character(
             id=char_id, name=name, at=at, agenda=agenda, aim="",
             is_agentic=is_agentic)
-        if is_agentic:
-            self.agentic_char_id = char_id
         return char_id
 
     def character_quota_status(self, turn_number: int) -> str:
@@ -316,19 +351,19 @@ class World:
         RESOLVE-Versuche) keine neue Figur hervorbringt.
 
         Kein Modellaufruf - ein schmuckloser NPC ist besser als ein
-        gebrochenes Versprechen an den Spieler. Ohne echten
-        agenda_target_hint gibt es kein sinnvolles shared_target; bleibt
-        dann leer statt geraten - der agentische Zug faellt fuer diese
-        Figur inhaltlich schwach aus, aber das Spiel bricht nicht ab.
+        gebrochenes Versprechen an den Spieler. Ohne echten Ziel-Hinweis
+        bleibt hidden_target leer statt geraten - der agentische Zug faellt
+        fuer diese Figur inhaltlich schwach aus, aber das Spiel bricht nicht
+        ab.
         """
         used = {c.name for c in self.characters.values()}
         name = next((n for n in names_pool if n not in used), "Stranger")
-        make_agentic = self.agentic_char_id is None
-        char_id = self.add_character(name=name, at=self.player_at,
-                                     agenda="", is_agentic=make_agentic)
-        if make_agentic and self.shared_target is None:
-            self.shared_target = ""
-        return char_id
+        make_agentic = self.agentic_count() < self.max_agentic
+        # hidden_target bleibt leer: ohne echten agenda_target_hint gibt es
+        # nichts sinnvoll abzuleiten - der agentische Zug faellt fuer diese
+        # Figur inhaltlich schwach aus, aber das Spiel bricht nicht ab.
+        return self.add_character(name=name, at=self.player_at,
+                                  agenda="", is_agentic=make_agentic)
 
     # ------------------------------------------------------------ Rendern
 
@@ -396,13 +431,13 @@ class World:
           - die Spielerposition, wenn er woanders ist
           - das Rundenprotokoll (das ist Erzaehler-Material, nicht ihres)
 
-        EINE Ausnahme, nur fuer die agentische Figur (char.id ==
-        self.agentic_char_id): eine zusaetzliche Zeile mit shared_target,
-        dem verborgenen gemeinsamen Ziel mit dem Spieler. Diese Zeile geht
-        NUR hierher - nie in render() (das sehen RESOLVE UND der Spieler-
-        Kontext) und nie in narrate_model()s Kontext. Ohne sie koennte diese
-        eine Figur ihr shared_target nicht konsistent verfolgen; mit ihr
-        NUR hier bleibt es fuer jeden anderen Aufruf unsichtbar.
+        EINE Ausnahme, nur fuer agentische Figuren mit gesetztem
+        hidden_target: eine zusaetzliche Zeile mit dem verborgenen Ziel, auf
+        das diese Figur zieht. Sie geht NUR hierher - nie in render() (das
+        sehen RESOLVE UND der Spieler-Kontext) und nie in narrate_model()s
+        Kontext. Ohne sie koennte die Figur ihr Ziel nicht konsistent
+        verfolgen; mit ihr NUR hier bleibt es fuer jeden anderen Aufruf
+        unsichtbar. Jede agentische Figur hat ihr eigenes.
         """
         node = self.nodes[char.at]
 
@@ -411,8 +446,8 @@ class World:
             f"YOUR AGENDA: {char.agenda}",
             f"YOUR CURRENT AIM: {char.aim or '(not yet set - decide one now)'}",
         ]
-        if char.id == self.agentic_char_id and self.shared_target:
-            lines.append(f"YOUR HIDDEN AIM RELATES TO: {self.shared_target}")
+        if char.is_agentic and char.hidden_target:
+            lines.append(f"YOUR HIDDEN AIM RELATES TO: {char.hidden_target}")
         # Die Story-Richtung geht an JEDE Figur (nicht nur die agentische):
         # sie soll spueren, wohin es zieht und was draengt, auch wenn ihre
         # eigene agenda etwas anderes will. Nie aussprechen.
@@ -470,9 +505,14 @@ class World:
             lines.append("PRESENT: " + ", ".join(c.name for c in present))
         return "\n".join(lines)
 
-    def hidden_target_leaked(self, narrator_text: str) -> bool:
-        """Ist das verborgene gemeinsame Ziel ODER die Story-Richtung
+    def secret_leaked(self, narrator_text: str) -> bool:
+        """Ist ein verborgenes Figuren-Ziel ODER die Story-Richtung
         (pull/pressure) woertlich in narrator_text durchgesickert?
+
+        Heisst bewusst secret_leaked und nicht *_target_*: der Methodenname
+        darf den Feldnamen (hidden_target) nicht als Teilstring enthalten,
+        sonst schluege der Grep-Test (tests/test_no_leaked_field_names.py)
+        auf story.py an, das diese Methode aufruft.
 
         Diese Pruefung lebt bewusst HIER und nicht in story.py, obwohl sie
         story.Game._narrate aufruft: der Feldname des verborgenen Ziels
@@ -487,10 +527,9 @@ class World:
         aber wenn er kommt, ist er ein echtes Leck.
         """
         haystack = narrator_text.lower()
-        for secret in (self.shared_target, self.pull, self.pressure):
-            if secret and secret.lower() in haystack:
-                return True
-        return False
+        secrets = [c.hidden_target for c in self.characters.values()]
+        secrets += [self.pull, self.pressure]
+        return any(s and s.lower() in haystack for s in secrets)
 
     def remember(self, narration: str) -> None:
         """Eine neue Erzaehlung als stilistischen Anker vormerken.
@@ -537,7 +576,8 @@ class World:
         agenda und aim stehen nur bei handlungsfaehigen Figuren - bei einer
         toten waeren sie bestenfalls verwirrend.
         """
-        line = f"CHAR {char.id} {char.name} @{char.at} {char.status}"
+        agentic = " agentic" if char.is_agentic else ""
+        line = f"CHAR {char.id} {char.name} @{char.at} {char.status}{agentic}"
         if char.status != "active":
             return line
         return f"{line}   wants: {char.agenda} | now: {char.aim}"
@@ -553,9 +593,9 @@ class World:
         """Das Delta EINES Akteurzuges anwenden. Rueckgabe: was abgelehnt
         wurde.
 
-        Eine Runde besteht aus hoechstens zwei Aufrufen hier (Spieler, dann
-        - falls vorhanden - die eine agentische Figur). Hier - und nur hier
-        - waechst die Welt. Die Rueckgabeliste ist kein Fehlerkanal, sondern
+        Eine Runde ruft das hier je aktivem Akteur einmal (Spieler, dann jede
+        aktive agentische Figur in Zug-Reihenfolge). Hier - und nur hier -
+        waechst die Welt. Die Rueckgabeliste ist kein Fehlerkanal, sondern
         eine Beobachtung fuers Debug-Log: sie zeigt, wo das Modell etwas
         wollte, was der Graph nicht hergibt.
 
@@ -629,6 +669,11 @@ class World:
                 rejected.append(f"status {change.character}: unknown character")
             else:
                 char.status = change.status
+                # Ein toter NPC verlaesst den agentischen Pool: agentic_count()
+                # sinkt, ein spaeter eingefuehrter NPC kann den Slot erben.
+                # Nur bei "dead", nicht bei "disabled" (kann sich erholen).
+                if change.status == "dead":
+                    char.is_agentic = False
 
         # --- Spuren am Ort ---
         for mark in delta.marks_added:
@@ -699,50 +744,25 @@ class World:
     def _introduce_characters(self, new_chars, rejected: list[str]) -> None:
         """0-2 vorgeschlagene Figuren tatsaechlich anlegen.
 
-        Die ERSTE Figur im ganzen Spiel wird agentisch - egal ob sie aus
-        INIT kommt oder aus einem spaeteren Zug (Spielregel: genau eine
-        agentische Figur, und das agentische Spiel soll frueh laufen, weil
-        der Umgang mit den Agenten der Kern ist). Stecken mehrere Kandidaten
-        im selben Aufruf und es gibt noch keine agentische, entscheidet
-        _pick_agentic_index() zwischen ihnen - NICHT das Modell.
+        Die ersten MAX_AGENTIC Figuren im Spiel werden agentisch - egal ob
+        aus INIT oder aus einem spaeteren Zug, in Einfuegereihenfolge (kein
+        Modell-Urteil, kein Vorsortieren). Danach eingefuehrte Figuren sind
+        nicht agentisch; ihr Verhalten faellt in NARRATE. Stirbt eine
+        agentische Figur, gibt sie ihren Slot frei (apply_turn), und die
+        naechste eingefuehrte kann nachruecken.
+
+        Jede beförderte Figur bekommt ihr eigenes hidden_target aus ihrem
+        agenda_target_hint - das pro-Figur verborgene Ziel, nur in ihrem
+        eigenen DECIDE-Kontext sichtbar.
         """
-        new_chars = list(new_chars[:2])   # 0-2 laut Schema, defensiv gekappt
-
-        if self.agentic_char_id is None and len(new_chars) > 1:
-            idx = self._pick_agentic_index(new_chars)
-            new_chars[0], new_chars[idx] = new_chars[idx], new_chars[0]
-
-        for nc in new_chars:
+        for nc in list(new_chars[:2]):   # 0-2 laut Schema, defensiv gekappt
             if nc.at not in self.nodes:
                 rejected.append(f"character {nc.name}: unknown node {nc.at}")
                 continue
-            make_agentic = self.agentic_char_id is None
-            self.add_character(nc.name, nc.at, nc.agenda_draft, make_agentic)
+            make_agentic = self.agentic_count() < self.max_agentic
+            char_id = self.add_character(nc.name, nc.at, nc.agenda_draft,
+                                         make_agentic)
             if make_agentic:
-                self.shared_target = self._derive_shared_target(
-                    nc.agenda_target_hint)
-
-    def _pick_agentic_index(self, candidates: list) -> int:
-        """Welcher von mehreren gleichzeitig vorgeschlagenen Kandidaten wird
-        die agentische Figur?
-
-        Naeherung an "zeigt am konkretesten auf etwas, das bereits in der
-        Welt existiert" (Brief 3.3): ein simpler, deterministischer
-        Teilstring-Abgleich von agenda_target_hint gegen bestehende
-        Knotennamen/-anchors - kein echtes Konkretheits-Urteil (das waere
-        ein eigener Modellaufruf). Kein Treffer oder mehrere: der erste
-        Kandidat in Listenreihenfolge gewinnt.
-        """
-        world_text = " ".join(n.name.lower() + " " + n.anchor.lower()
-                              for n in self.nodes.values())
-        for i, c in enumerate(candidates):
-            if c.agenda_target_hint.lower() in world_text:
-                return i
-        return 0
-
-    def _derive_shared_target(self, hint: str) -> str:
-        """agenda_target_hint ist bereits die knappe Nominalphrase (siehe
-        schema.py, NewCharacter) - hier nur benannt, damit ein spaeterer,
-        aufwendigerer Ableitungsschritt (falls je noetig) einen einzigen
-        Ort haette, an dem er entstuende."""
-        return hint
+                # agenda_target_hint ist bereits die knappe Nominalphrase
+                # (schema.py, NewCharacter) - direkt uebernommen.
+                self.characters[char_id].hidden_target = nc.agenda_target_hint

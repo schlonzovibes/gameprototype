@@ -871,28 +871,37 @@ Wo der `flaw` mechanisch beisst:
 
 ---
 
-## 7. Agentic-NPCs (bis zu 4)
+## 7. Agentic-NPCs (bis zu 4)  *(umgesetzt)*
 
 - Der agentische Loop laeuft, **sobald der erste NPC existiert**.
-- Beim Einfuehren wird ein NPC `agentic = True`, solange
-  `count(agentic) < max_agentic` (4). Danach eingefuehrte NPCs sind
-  `agentic = False`.
-- `advance()` verarbeitet pro Runde: **1x Spieler-RESOLVE**, dann
-  **je agentischem NPC** (in Spawn-Reihenfolge, nur aktive) **DECIDE ->
-  RESOLVE(agentic)**, dann **1x NARRATE**.
+- Beim Einfuehren wird ein NPC `is_agentic = True`, solange
+  `agentic_count() < max_agentic` (`state.MAX_AGENTIC`, Default 4, env
+  `AIGAME_MAX_AGENTIC`). Danach eingefuehrte NPCs sind nicht agentisch. Die
+  Reihenfolge ergibt sich aus der Einfuegereihenfolge von `World.characters`
+  (kein Vorsortieren, kein Modell-Urteil - `_pick_agentic_index` entfaellt).
+- **Stirbt** ein agentischer NPC, setzt `apply_turn` sein `is_agentic` auf
+  `False` - der Slot wird frei, eine spaeter eingefuehrte Figur rueckt nach.
+  `disabled` haelt den Slot (kann sich erholen).
+- `advance()` pro Runde: **1x Spieler-RESOLVE**, dann fuer alle aktiven
+  agentischen NPCs (`world.agentic_actors()`) **erst alle DECIDE gefaechert**
+  (`_decide_all` - Phase 3: `ThreadPoolExecutor` gegen vLLM; Phase 2:
+  seriell), dann **je NPC seriell** in Zug-Reihenfolge sein RESOLVE(agentic)
+  + `apply_turn` (damit NPC N+1 das Delta von N sieht), dann **1x NARRATE**.
 - Nicht-agentische NPCs (5+): kein eigener Zug. Sie sind anwesend,
   wahrnehmbar und wahrnehmend; ihr Verhalten faellt in NARRATE.
-- Fehlerisolierung wie heute: scheitert DECIDE/RESOLVE eines NPC, entfaellt
-  nur dessen Zug.
+- Fehlerisolierung: scheitert DECIDE/RESOLVE eines NPC, entfaellt nur dessen
+  Zug. Ein NPC, den ein frueherer Agent diese Runde getoetet hat, wird beim
+  RESOLVE uebersprungen.
 
-**Kosten:** 4 agentische NPCs = bis zu `1 + 4*2 + 1 = 10` LLM-Aufrufe pro
-Runde. **[FRAGE]** ist das akzeptabel, oder soll `max_agentic` kleiner
-sein (2?) bzw. nur die N naechsten NPCs am Spieler agentisch handeln?
+**Kosten:** 4 agentische NPCs = bis zu `1 + 4 + 4 + 1` LLM-Aufrufe pro Runde
+(die 4 DECIDE parallel). `--max-num-seqs` >= `max_agentic` halten, sonst
+stauen sich die DECIDE-Aufrufe (`story.LLM_CONCURRENCY` deckelt zusaetzlich).
 
-`shared_target` heute nur zwischen Spieler + 1 agentischem NPC. Neu: jeder
-agentische NPC hat sein eigenes, spielerbezogenes `goal` (6a), das
-mittelbar an `direction.pull` zieht - kein geteiltes verborgenes Feld. Das
-entfaellt damit; nur `direction` bleibt (und nur fuer RESOLVE/DECIDE).
+`shared_target` (Spieler + 1 NPC) ist ersetzt durch pro-NPC
+`Character.hidden_target` (aus `agenda_target_hint`): nur im DECIDE-Kontext
+DIESER Figur sichtbar (`render_for`), nie in `render()`/NARRATE. Der volle
+`goal`/`stance`/`bonds`-Umbau (§6a) bleibt Entwurf. `direction` (pull/
+pressure) geht weiterhin an jede Figur.
 
 ---
 
@@ -916,9 +925,9 @@ def character_quota_status(self, turn_number: int) -> str:
 
 - Notbremse (`spawn_fallback_character`) + Retry-Schleife in `advance()`
   bleiben, greifen jetzt bei 0 Figuren nach Zug 5.
-- Der **erste** NPC im Spiel wird `agentic` (`_introduce_characters`,
-  siehe 7) - egal ob aus INIT oder aus einem spaeteren Zug. Nicht mehr
-  "der dritte".
+- Die ersten `max_agentic` NPCs im Spiel werden `is_agentic`
+  (`_introduce_characters`, siehe 7) - egal ob aus INIT oder aus einem
+  spaeteren Zug, in Spawn-Reihenfolge.
 
 Umgesetzt in: `schema.init_model()` (`starting_characters`-Feld),
 `game_prompts/default/init.txt` (Abschnitt 3 "WHO IS IN THE ROOM"),

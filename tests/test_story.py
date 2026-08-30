@@ -73,7 +73,9 @@ class FakeEngine:
         return _reply(_fill(model_cls))
 
 
-def _world_with_agentic() -> World:
+def _world_with_agents(*names) -> World:
+    """Eine Welt mit zwei verbundenen Knoten und je einer agentischen Figur
+    pro Name (alle an n1). Ohne Namen: eine Figur namens Vogel."""
     world = World(
         language="en",
         nodes={
@@ -84,8 +86,13 @@ def _world_with_agentic() -> World:
         },
         characters={}, facts=[], player_at="n1",
     )
-    world.add_character("Vogel", "n1", "get out", is_agentic=True)
+    for name in (names or ("Vogel",)):
+        world.add_character(name, "n1", f"{name} wants out", is_agentic=True)
     return world
+
+
+def _world_with_agentic() -> World:
+    return _world_with_agents("Vogel")
 
 
 class GameTestCase(unittest.TestCase):
@@ -140,6 +147,61 @@ class AgenticFailureIsolationTest(GameTestCase):
         game.close()
 
 
+class MultiAgentRoundTest(GameTestCase):
+    """Die agentische Phase geht ueber ALLE aktiven agentischen Figuren -
+    je Figur ein DECIDE, dann seriell ihr RESOLVE. Fehler/Tod einer Figur
+    lassen die anderen unberuehrt."""
+
+    def test_every_active_agent_gets_a_decide_and_a_resolve(self):
+        engine = FakeEngine()
+        game = self._game(engine)
+        game.world = _world_with_agents("Vogel", "Renner", "Kranz")
+
+        game.advance("wait")
+
+        self.assertEqual(engine.calls.count("Decide"), 3)
+        self.assertEqual(engine.calls.count("ResolveAgentic"), 3)
+        game.close()
+
+    def test_one_failed_decide_isolates_only_that_agent(self):
+        engine = FakeEngine(fail_on={"YOU ARE c2"})   # nur Renners DECIDE
+        game = self._game(engine)
+        game.world = _world_with_agents("Vogel", "Renner", "Kranz")
+
+        game.advance("wait")
+
+        self.assertEqual(engine.calls.count("Decide"), 3)          # alle drei versucht
+        self.assertEqual(engine.calls.count("ResolveAgentic"), 2)  # c2 faellt aus
+        self.assertEqual(game.world.characters["c2"].aim, "",
+                         "c2s DECIDE warf, sein aim bleibt unveraendert")
+        game.close()
+
+    def test_agent_killed_by_an_earlier_agent_is_skipped(self):
+        class KillEngine(FakeEngine):
+            def structured(self, messages, model_cls, retries=1):
+                self.calls.append(model_cls.__name__)
+                user = messages[1]["content"]
+                if model_cls.__name__ == "ResolveAgentic" and "ACTING: c1" in user:
+                    SC = model_cls.model_fields["status_changes"].annotation.__args__[0]
+                    kill = _fill(SC, {"character": "c2", "status": "dead"})
+                    return _reply(_fill(model_cls, {"status_changes": [kill]}))
+                return _reply(_fill(model_cls))
+
+        engine = KillEngine()
+        game = self._game(engine)
+        game.world = _world_with_agents("Vogel", "Renner", "Kranz")
+
+        game.advance("wait")
+
+        self.assertEqual(game.world.characters["c2"].status, "dead")
+        self.assertFalse(game.world.characters["c2"].is_agentic,
+                         "ein toter Agent verlaesst den Pool")
+        self.assertEqual(engine.calls.count("Decide"), 3)
+        self.assertEqual(engine.calls.count("ResolveAgentic"), 2,
+                         "c2s RESOLVE wird uebersprungen, c1 und c3 laufen")
+        game.close()
+
+
 class NarrateFailureTest(GameTestCase):
     def test_failed_narrate_leaves_world_unchanged(self):
         engine = FakeEngine(fail_on={"YOUR PLACE"})
@@ -180,7 +242,7 @@ class QuotaNotbremseTest(GameTestCase):
         player_resolve_calls = sum(1 for c in engine.calls if c == "ResolvePlayer")
         self.assertEqual(player_resolve_calls, 3)
         self.assertEqual(len(game.world.characters), 1)
-        self.assertIsNotNone(game.world.agentic_char_id)
+        self.assertTrue(game.world.agentic_actors())   # der Fallback ist agentisch
         game.close()
 
     def test_soft_direction_does_not_force_retries(self):

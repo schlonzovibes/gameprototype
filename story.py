@@ -22,11 +22,11 @@ prefix-cachebar - der Server prefillt ihn einmal und danach nie wieder.
 
     game_prompts/<name>/init.txt            Weltgenerator - erzeugt NUR den
                                             Startraum, laeuft genau einmal
-    game_prompts/<name>/decide.txt          die eine agentische Figur
-                                            entscheidet fuer sich
+    game_prompts/<name>/decide.txt          eine agentische Figur entscheidet
+                                            fuer sich
     game_prompts/<name>/resolve_player.txt  loest die Spieleraktion zu
                                             einem Delta auf
-    game_prompts/<name>/resolve_agentic.txt loest den Zug der agentischen
+    game_prompts/<name>/resolve_agentic.txt loest den Zug einer agentischen
                                             Figur zu einem Delta auf
     game_prompts/<name>/narrate.txt         erzaehlt, was der Spieler
                                             wahrnehmen konnte
@@ -42,33 +42,37 @@ Wiederholungsversuchen keine Figur vom Modell bekommt und der Client eine
 schmucklose NPC-Figur selbst anlegen muss. Fehlt die Datei, greift eine
 kleine eingebaute Liste - ein Spielsystem ohne diese Datei bleibt spielbar.
 
-=== Die wachsende Welt und der eine agentische NPC ===
+=== Die wachsende Welt und die agentischen NPCs ===
 
-INIT erzeugt nur einen Startraum, keinen Graphen, keine Figuren - die
-Levelgeometrie entsteht waehrend des Spielens: RESOLVE(mode=player) darf
-einen neuen Raum vorschlagen, sobald die Erzaehlung ihn braucht (persistent,
-kein Raum verschwindet je wieder), und bis spaetestens Runde 5 muessen
-mindestens drei Figuren aufgetaucht sein, davon genau eine agentisch (siehe
-state.World.character_quota_status - weiche Fuehrung, dann eine harte
-Notbremse mit begrenzten Wiederholungsversuchen).
+INIT erzeugt nur einen Startraum, keinen Graphen - Figuren stehen 0-2 schon
+darin. Die Levelgeometrie entsteht waehrend des Spielens: RESOLVE(mode=player)
+darf einen neuen Raum vorschlagen, sobald die Erzaehlung ihn braucht
+(persistent, kein Raum verschwindet je wieder). Ist WIRKLICH niemand da, muss
+bis Runde 5 eine Figur auftauchen (siehe state.World.character_quota_status -
+weiche Fuehrung, dann eine harte Notbremse mit begrenzten Versuchen).
 
-Eine Runde besteht aus hoechstens zwei Akteurzuegen: der Spieler (RESOLVE
-mode=player), dann - falls die eine agentische Figur schon existiert und
-aktiv ist - ihr eigener Zug (DECIDE aus ihrer gefilterten Wahrnehmung
-heraus, dann RESOLVE mode=agentic mit vollem Weltwissen). Zuletzt EIN
-Erzaehl-Aufruf (NARRATE), der nur die Ereignisse sieht, die am Spielerort
-passiert sind. Der Resolver erzaehlt selbst nichts mehr - er liefert nur
-strukturierte events (Ort + Klausel), aus denen sich Erinnerungen und
-Erzaehlmaterial deterministisch ergeben (siehe state.World.apply_turn/
-visible). Die ganze Runde laeuft auf einer Kopie der Welt (World.copy())
-und wird erst nach erfolgreichem NARRATE committet - schlaegt etwas davor
-fehl, ist self.world exakt wie vorher.
+Die ersten state.MAX_AGENTIC (Default 4, AIGAME_MAX_AGENTIC) eingefuehrten
+Figuren werden agentisch: sie bekommen pro Runde einen eigenen Zug. Stirbt
+eine, gibt sie ihren Slot frei und eine spaeter eingefuehrte rueckt nach.
 
-Die agentische Figur verfolgt zusaetzlich ein VERBORGENES gemeinsames Ziel
-mit dem Spieler (siehe state.py) - real und beide Akteure lenkend, aber nie
-ausgesprochen. Ein einfacher Teilstring-Check nach jedem NARRATE
-protokolliert einen Verstoss (falls der Erzaehltext das Ziel doch woertlich
-nennt) ins Debug-Log, ohne das Spiel abzubrechen.
+Eine Runde: zuerst der Spieler (RESOLVE mode=player), dann je aktive
+agentische Figur in Zug-Reihenfolge ein DECIDE (aus ihrer gefilterten
+Wahrnehmung; die DECIDE-Aufrufe werden gegen vLLM GEFAECHERT, siehe
+_decide_all) und danach - SERIELL, damit Figur N+1 das schon angewandte
+Delta von Figur N sieht - ihr RESOLVE(mode=agentic) mit vollem Weltwissen.
+Zuletzt EIN NARRATE, der nur die Ereignisse am Spielerort sieht. Der
+Resolver erzaehlt nichts mehr - er liefert strukturierte events (Ort +
+Klausel), aus denen sich Erinnerungen und Erzaehlmaterial deterministisch
+ergeben (state.World.apply_turn/visible). Die ganze Runde laeuft auf einer
+Kopie der Welt (World.copy()) und wird erst nach erfolgreichem NARRATE
+committet - schlaegt etwas davor fehl, ist self.world exakt wie vorher.
+Scheitert das DECIDE oder RESOLVE EINER agentischen Figur, entfaellt nur
+ihr Zug.
+
+Jede agentische Figur verfolgt zusaetzlich ein VERBORGENES Ziel (state.py) -
+real und lenkend, aber nie ausgesprochen. Ein einfacher Teilstring-Check
+nach jedem NARRATE protokolliert einen Verstoss ins Debug-Log, ohne das
+Spiel abzubrechen.
 """
 
 from __future__ import annotations
@@ -272,8 +276,8 @@ class Game:
         )
 
     def advance(self, player_input: str, on_actor=None) -> Beat:
-        """Eine Runde spielen: Spieler, dann hoechstens ein agentischer Zug,
-        dann Erzaehlung.
+        """Eine Runde spielen: Spieler, dann die agentischen Zuege, dann
+        Erzaehlung.
 
         Laeuft komplett auf einer KOPIE der Welt (World.copy()) und
         committet sie erst hier am Ende, NACH erfolgreichem NARRATE. Ein
@@ -281,13 +285,14 @@ class Game:
 
         Fehlerisolierung nach Wichtigkeit: scheitert der Spieler-RESOLVE
         oder NARRATE, ist die ganze Runde verworfen und der Spieler darf es
-        nochmal versuchen. Scheitert DECIDE oder RESOLVE fuer die agentische
-        Figur, entfaellt NUR ihr Zug - der Spielerzug und die Erzaehlung
-        laufen trotzdem.
+        nochmal versuchen. Scheitert DECIDE oder RESOLVE einer EINZELNEN
+        agentischen Figur, entfaellt nur ihr Zug - Spielerzug, die anderen
+        Agenten und die Erzaehlung laufen trotzdem.
 
-        on_actor ist optional und wird - wenn uebergeben - mit einem
-        Klartext-Label aufgerufen, sobald die agentische Figur an der Reihe
-        ist ("Vogel is acting"). Passt auf main.py's ui.Status.update() als
+        on_actor ist optional und wird - wenn uebergeben - einmal je Runde
+        mit einem Klartext-Label aufgerufen, sobald die agentische Phase
+        beginnt ("Vogel is acting" bzw. "3 characters are acting"). Passt auf
+        main.py's ui.Status.update() als
         on_actor=lambda label: status.update(label=label).
         """
         if self.world is None:                      # pragma: no cover
@@ -338,22 +343,41 @@ class Game:
             self._log_block("QUOTA FALLBACK",
                             f"client-spawned {fallback_id} after {attempts} attempt(s)")
 
-        # --- 2. hoechstens EIN agentischer Zug ---
-        npc = (world.characters.get(world.agentic_char_id)
-              if world.agentic_char_id else None)
-        if npc and npc.status == "active":
+        # --- 2. die agentischen Zuege ---
+        # Je aktive agentische Figur (in Spawn-Reihenfolge) ein DECIDE, dann
+        # ihr RESOLVE. Die DECIDE-Aufrufe sind unabhaengig und werden
+        # gefaechert (_decide_all); die RESOLVE-Aufrufe laufen SERIELL, damit
+        # Figur N+1 das schon angewandte Delta von Figur N sieht - der
+        # "jemand war schneller"-Mechanismus (resolve_agentic.txt) haengt
+        # daran. Ein gescheitertes DECIDE/RESOLVE entfernt nur den Zug dieser
+        # einen Figur (Design-Doc §7).
+        agents = world.agentic_actors()
+        if agents:
             if on_actor:
-                on_actor(f"{npc.name} is acting")
-            try:
-                decision = self._decide(world, npc)
-                npc.aim = decision.aim
-                delta_n = self._resolve(
-                    world, actor_id=npc.id, actor_node=npc.at, mode="agentic",
-                    action_block=self._resolve_block_npc(npc, decision))
-                log += world.apply_turn(npc.id, delta_n)
-            except Exception as e:
-                self._log_thinking(getattr(e, "thinking", ""))
-                self._log_block(f"AGENTIC {npc.id} failed - skipped", str(e))
+                on_actor(self._acting_label(agents))
+            decisions = self._decide_all(world, agents)
+            for npc, decision in zip(agents, decisions):
+                if decision is not None:
+                    npc.aim = decision.aim
+            for npc, decision in zip(agents, decisions):
+                if decision is None:
+                    continue
+                if npc.status != "active":
+                    self._log_block(
+                        f"AGENTIC {npc.id} skipped",
+                        f"no longer active ({npc.status}) after an earlier "
+                        f"agent's turn this round")
+                    continue
+                try:
+                    delta_n = self._resolve(
+                        world, actor_id=npc.id, actor_node=npc.at,
+                        mode="agentic",
+                        action_block=self._resolve_block_npc(npc, decision))
+                    log += world.apply_turn(npc.id, delta_n)
+                except Exception as e:
+                    self._log_thinking(getattr(e, "thinking", ""))
+                    self._log_block(f"AGENTIC {npc.id} failed - skipped",
+                                    str(e))
 
         if log:
             self._log_block("REJECTED", "\n".join(log))
@@ -451,6 +475,35 @@ class Game:
                 f"THEY SAY: {decision.utterance or '(nothing)'}\n"
                 f"THEY MOVE TO: {decision.move_to}\n")
 
+    def _acting_label(self, agents) -> str:
+        """Der on_actor-Text fuer die agentische Phase (main.py zeigt ihn im
+        Spinner). Einmal pro Runde, nicht pro Figur - bei gefaecherten
+        DECIDE-Aufrufen wuerde ein Text je Figur nur flackern."""
+        if len(agents) == 1:
+            return f"{agents[0].name} is acting"
+        return f"{len(agents)} characters are acting"
+
+    def _decide_all(self, world: World, agents: list):
+        """Je Figur ihr DECIDE. Rueckgabe: Liste in agents-Reihenfolge, None
+        wo das DECIDE einer Figur gescheitert ist (nur ihr Zug entfaellt,
+        Design-Doc §7).
+
+        Phase 2: seriell. Die DECIDE-Aufrufe sind voneinander unabhaengig -
+        jeder liest nur world.render_for(seine Figur), keiner mutiert etwas
+        Geteiltes (die aims werden erst NACH dieser Methode gesetzt). Phase 3
+        ersetzt den Schleifenrumpf durch eine ThreadPool-Faecherung gegen
+        vLLM.
+        """
+        out = []
+        for npc in agents:
+            try:
+                out.append(self._decide(world, npc))
+            except Exception as e:
+                self._log_thinking(getattr(e, "thinking", ""))
+                self._log_block(f"DECIDE {npc.id} failed - skipped", str(e))
+                out.append(None)
+        return out
+
     def _decide(self, world: World, npc):
         """Eine Figur fuer sich entscheiden lassen, aus IHRER Wahrnehmung
         allein.
@@ -514,17 +567,16 @@ class Game:
         return reply.value
 
     def _check_narration_leak(self, narration: str, world: World) -> None:
-        """Ist das verborgene gemeinsame Ziel der agentischen Figur woertlich
+        """Ist ein verborgenes Figuren-Ziel oder die Story-Richtung woertlich
         in die Erzaehlung durchgesickert?
 
-        Die eigentliche Pruefung sitzt in World.hidden_target_leaked() -
-        story.py fragt nur, ohne den Feldnamen selbst zu kennen (siehe dort,
-        warum das absichtlich getrennt ist). Ein Treffer ist kein
-        Spielabbruch: er wird sichtbar ins Debug-Log geschrieben, damit man
-        ihn beim Playtesting nachschaerfen kann, statt dass er unbemerkt
-        durchrutscht.
+        Die eigentliche Pruefung sitzt in World.secret_leaked() - story.py
+        fragt nur, ohne den Feldnamen selbst zu kennen (siehe dort, warum das
+        absichtlich getrennt ist). Ein Treffer ist kein Spielabbruch: er wird
+        sichtbar ins Debug-Log geschrieben, damit man ihn beim Playtesting
+        nachschaerfen kann, statt dass er unbemerkt durchrutscht.
         """
-        if world.hidden_target_leaked(narration):
+        if world.secret_leaked(narration):
             self._log_block("HIDDEN TARGET LEAK",
                             "the narration names the hidden shared target verbatim")
 
