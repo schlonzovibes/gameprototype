@@ -4,6 +4,8 @@ eines echten Sprachmodells.
 """
 
 import tempfile
+import threading
+import time
 import typing
 import unittest
 from pathlib import Path
@@ -174,6 +176,34 @@ class MultiAgentRoundTest(GameTestCase):
         self.assertEqual(engine.calls.count("ResolveAgentic"), 2)  # c2 faellt aus
         self.assertEqual(game.world.characters["c2"].aim, "",
                          "c2s DECIDE warf, sein aim bleibt unveraendert")
+        game.close()
+
+    def test_decide_calls_of_a_round_run_concurrently(self):
+        """Die DECIDE-Faecherung (_decide_all) schickt die Aufrufe
+        gleichzeitig gegen vLLM - nicht seriell nacheinander."""
+        active = {"now": 0, "peak": 0}
+        lock = threading.Lock()
+
+        class SlowEngine(FakeEngine):
+            def structured(self, messages, model_cls, retries=1):
+                self.calls.append(model_cls.__name__)
+                if model_cls.__name__ == "Decide":
+                    with lock:
+                        active["now"] += 1
+                        active["peak"] = max(active["peak"], active["now"])
+                    time.sleep(0.05)
+                    with lock:
+                        active["now"] -= 1
+                return _reply(_fill(model_cls))
+
+        engine = SlowEngine()
+        game = self._game(engine)
+        game.world = _world_with_agents("A", "B", "C")
+
+        game.advance("wait")
+
+        self.assertGreaterEqual(active["peak"], 2,
+                                "DECIDE-Aufrufe liefen seriell statt gefaechert")
         game.close()
 
     def test_agent_killed_by_an_earlier_agent_is_skipped(self):

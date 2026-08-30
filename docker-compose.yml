@@ -64,6 +64,16 @@ services:
       # response (finish_reason=length)" kommt. 1.5 ist Qwens Vorschlag bei
       # sichtbaren Schleifen. Deutlich hoeher -> Sprachmischung. 0 = aus.
       AIGAME_PRESENCE_PENALTY: "1.5"
+      # Bis zu wie viele Figuren pro Runde einen eigenen DECIDE/RESOLVE-Zug
+      # bekommen (state.MAX_AGENTIC). Die ersten so vielen eingefuehrten
+      # Figuren werden agentisch; ein toter Agent gibt seinen Slot frei.
+      AIGAME_MAX_AGENTIC: "4"
+      # Wie viele der DECIDE-Aufrufe einer Runde gleichzeitig gegen vLLM
+      # laufen (story.LLM_CONCURRENCY). NICHT hoeher als --max-num-seqs in
+      # AIGAME_VLLM_ARGS setzen (unten, dort 4), sonst stauen sich die
+      # Requests statt zu batchen. Bei AIGAME_MAX_AGENTIC > 4 auch
+      # --max-num-seqs entsprechend anheben.
+      AIGAME_LLM_CONCURRENCY: "4"
       # Anteil des gemeinsamen Speichers fuer vLLM (Gewichte + KV-Cache).
       # 0.65 von 128 GB sind rund 83 GB (Wert aus dem Arena-Rezept); der
       # grosszuegige Rest bleibt fuers Bildmodell, das danach geladen wird.

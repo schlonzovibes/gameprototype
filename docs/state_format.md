@@ -884,9 +884,10 @@ Wo der `flaw` mechanisch beisst:
   `disabled` haelt den Slot (kann sich erholen).
 - `advance()` pro Runde: **1x Spieler-RESOLVE**, dann fuer alle aktiven
   agentischen NPCs (`world.agentic_actors()`) **erst alle DECIDE gefaechert**
-  (`_decide_all` - Phase 3: `ThreadPoolExecutor` gegen vLLM; Phase 2:
-  seriell), dann **je NPC seriell** in Zug-Reihenfolge sein RESOLVE(agentic)
-  + `apply_turn` (damit NPC N+1 das Delta von N sieht), dann **1x NARRATE**.
+  (`_decide_all` - `ThreadPoolExecutor(max_workers=min(N, LLM_CONCURRENCY))`
+  gegen vLLM; ein Einzelagent laeuft ohne Pool), dann **je NPC seriell** in
+  Zug-Reihenfolge sein RESOLVE(agentic) + `apply_turn` (damit NPC N+1 das
+  Delta von N sieht), dann **1x NARRATE**.
 - Nicht-agentische NPCs (5+): kein eigener Zug. Sie sind anwesend,
   wahrnehmbar und wahrnehmend; ihr Verhalten faellt in NARRATE.
 - Fehlerisolierung: scheitert DECIDE/RESOLVE eines NPC, entfaellt nur dessen

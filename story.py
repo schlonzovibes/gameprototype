@@ -77,8 +77,11 @@ Spiel abzubrechen.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import os
 import re
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -113,6 +116,14 @@ MAX_SCENES = 15
 # gern aufloest, koennte sonst in Szene 3 abschliessen - technisch richtig,
 # als Spiel wertlos.
 MIN_SCENES = 8
+
+# Wie viele DECIDE-Aufrufe der agentischen Figuren einer Runde gleichzeitig
+# gegen vLLM laufen duerfen (_decide_all). Die Aufrufe sind unabhaengig -
+# jeder liest nur world.render_for(seine Figur), keiner mutiert etwas
+# Geteiltes. vLLM batcht mehrere Sequenzen und liefert dann aggregiert mehr
+# Tokens/s. NICHT hoeher als --max-num-seqs des Servers setzen, sonst stauen
+# sich die Requests statt zu batchen (AIGAME_VLLM_ARGS in docker-compose.yml).
+LLM_CONCURRENCY = int(os.environ.get("AIGAME_LLM_CONCURRENCY", "4"))
 
 # Grobe Token-Schaetzung: Tokens ~ Woerter * 1.4. Die verbreitete Regel
 # "Zeichen / 4" liegt bei Prompt-Dateien dieser Machart um rund ein Drittel
@@ -199,6 +210,11 @@ class Game:
         # Die Welt entsteht erst in begin(). Bis dahin gibt es sie nicht -
         # und das soll man auch sehen koennen.
         self.world: World | None = None
+
+        # Serialisiert die Schreibzugriffe aufs Debug-Log: _decide_all faechert
+        # die DECIDE-Aufrufe in Threads, deren _log_block()-Aufrufe wuerden
+        # sonst ineinanderlaufen.
+        self._log_lock = threading.Lock()
 
         DEBUG_DIR.mkdir(exist_ok=True)
         log_path = _log_path(start_prompt)
@@ -484,25 +500,37 @@ class Game:
         return f"{len(agents)} characters are acting"
 
     def _decide_all(self, world: World, agents: list):
-        """Je Figur ihr DECIDE. Rueckgabe: Liste in agents-Reihenfolge, None
-        wo das DECIDE einer Figur gescheitert ist (nur ihr Zug entfaellt,
-        Design-Doc §7).
+        """Je Figur ihr DECIDE, gefaechert gegen vLLM. Rueckgabe: Liste in
+        agents-Reihenfolge, None wo das DECIDE einer Figur gescheitert ist
+        (nur ihr Zug entfaellt, Design-Doc §7).
 
-        Phase 2: seriell. Die DECIDE-Aufrufe sind voneinander unabhaengig -
-        jeder liest nur world.render_for(seine Figur), keiner mutiert etwas
-        Geteiltes (die aims werden erst NACH dieser Methode gesetzt). Phase 3
-        ersetzt den Schleifenrumpf durch eine ThreadPool-Faecherung gegen
-        vLLM.
+        Die DECIDE-Aufrufe sind voneinander unabhaengig: jeder liest nur
+        world.render_for(seine Figur) (rein lesend), keiner mutiert etwas
+        Geteiltes - die aims werden erst NACH dieser Methode gesetzt, das
+        world-mutierende RESOLVE laeuft danach seriell. structured() ist nach
+        dem M4-Umbau re-entrant, _log_block() ist gelockt.
+
+        Ein einzelner Agent laeuft ohne Pool - dann ist der Pfad byteweise
+        der von vor dem Umbau.
         """
-        out = []
-        for npc in agents:
-            try:
-                out.append(self._decide(world, npc))
-            except Exception as e:
-                self._log_thinking(getattr(e, "thinking", ""))
-                self._log_block(f"DECIDE {npc.id} failed - skipped", str(e))
-                out.append(None)
-        return out
+        if len(agents) == 1:
+            return [self._decide_safe(world, agents[0])]
+
+        workers = min(len(agents), LLM_CONCURRENCY)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(self._decide_safe, world, npc)
+                       for npc in agents]
+            return [f.result() for f in futures]
+
+    def _decide_safe(self, world: World, npc):
+        """_decide() mit Fehlerisolierung: ein gescheitertes DECIDE gibt None
+        zurueck (und wird geloggt), statt die ganze Faecherung zu reissen."""
+        try:
+            return self._decide(world, npc)
+        except Exception as e:
+            self._log_thinking(getattr(e, "thinking", ""))
+            self._log_block(f"DECIDE {npc.id} failed - skipped", str(e))
+            return None
 
     def _decide(self, world: World, npc):
         """Eine Figur fuer sich entscheiden lassen, aus IHRER Wahrnehmung
@@ -596,10 +624,15 @@ class Game:
                 + schema.describe(model_cls))
 
     def _log_block(self, title: str, body: str) -> None:
-        self.log.write(f"===== {title} =====\n{body}\n\n")
-        # Sofort schreiben: bei einem Absturz ist gerade der letzte Block
-        # der interessante, und der stuende sonst noch im Puffer.
-        self.log.flush()
+        # Unter dem Lock: parallele _decide()-Threads (siehe _decide_all)
+        # schreiben sonst verschraenkt. Blockgranular - die Bloecke eines
+        # Threads koennen mit denen eines anderen abwechseln, jeder traegt
+        # aber seine npc-Id im Titel.
+        with self._log_lock:
+            self.log.write(f"===== {title} =====\n{body}\n\n")
+            # Sofort schreiben: bei einem Absturz ist gerade der letzte Block
+            # der interessante, und der stuende sonst noch im Puffer.
+            self.log.flush()
 
     def _log_json(self, label: str) -> None:
         """Den vollen Weltzustand als JSON in die JSON_<slug>.txt schreiben.
