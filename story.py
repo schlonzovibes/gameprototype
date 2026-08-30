@@ -263,13 +263,13 @@ class Game:
             reply = self.engine.structured(
                 [{"role": "system", "content": system},
                  {"role": "user", "content": user}],
-                init_cls)
+                init_cls, call="init")
         except Exception as e:
-            self._log_thinking(getattr(e, "thinking", ""))
+            self._log_thinking(getattr(e, "thinking", ""), "init")
             raise SceneError(str(e)) from e
 
         init = reply.value
-        self._log_thinking(reply.thinking)
+        self._log_thinking(reply.thinking, "init")
         self._log_block("INIT / result", init.model_dump_json(indent=2))
 
         narration, image_prompt = schema.opening_text(init)
@@ -335,7 +335,7 @@ class Game:
                     action_block=self._resolve_block_player(player_input),
                     direction=direction)
             except Exception as e:
-                self._log_thinking(getattr(e, "thinking", ""))
+                self._log_thinking(getattr(e, "thinking", ""), "resolve")
                 raise SceneError(str(e)) from e
             if not mandatory or delta_p.characters_introduced:
                 break
@@ -391,7 +391,7 @@ class Game:
                         action_block=self._resolve_block_npc(npc, decision))
                     log += world.apply_turn(npc.id, delta_n)
                 except Exception as e:
-                    self._log_thinking(getattr(e, "thinking", ""))
+                    self._log_thinking(getattr(e, "thinking", ""), "resolve")
                     self._log_block(f"AGENTIC {npc.id} failed - skipped",
                                     str(e))
 
@@ -402,7 +402,7 @@ class Game:
         try:
             narrate = self._narrate(world, player_input)
         except Exception as e:
-            self._log_thinking(getattr(e, "thinking", ""))
+            self._log_thinking(getattr(e, "thinking", ""), "narrate")
             raise SceneError(str(e)) from e
         world.scene_number += 1
         # Der Client entscheidet ueber das Ende, nicht das Modell. can_end
@@ -475,9 +475,9 @@ class Game:
         reply = self.engine.structured(
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
-            resolve_cls)
+            resolve_cls, call="resolve")
 
-        self._log_thinking(reply.thinking)
+        self._log_thinking(reply.thinking, "resolve")
         self._log_block(f"RESOLVE {actor_id} / result",
                         reply.value.model_dump_json(indent=2))
         return reply.value
@@ -528,7 +528,7 @@ class Game:
         try:
             return self._decide(world, npc)
         except Exception as e:
-            self._log_thinking(getattr(e, "thinking", ""))
+            self._log_thinking(getattr(e, "thinking", ""), "decide")
             self._log_block(f"DECIDE {npc.id} failed - skipped", str(e))
             return None
 
@@ -553,9 +553,9 @@ class Game:
         reply = self.engine.structured(
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
-            decide_cls)
+            decide_cls, call="decide")
 
-        self._log_thinking(reply.thinking)
+        self._log_thinking(reply.thinking, "decide")
         self._log_block(f"DECIDE / {npc.id} result",
                         reply.value.model_dump_json(indent=2))
         return reply.value
@@ -588,9 +588,9 @@ class Game:
         reply = self.engine.structured(
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
-            narrate_cls)
+            narrate_cls, call="narrate")
 
-        self._log_thinking(reply.thinking)
+        self._log_thinking(reply.thinking, "narrate")
         self._log_block("NARRATE / result", reply.value.model_dump_json(indent=2))
         return reply.value
 
@@ -658,22 +658,26 @@ class Game:
         self.json_log.write("\n\n")
         self.json_log.flush()
 
-    def _log_thinking(self, thinking: str) -> None:
+    def _log_thinking(self, thinking: str, call: str = "") -> None:
         # THINKING steht IMMER da - eine fehlende Sektion waere sonst nicht
-        # von "Modell hat nicht gedacht" zu unterscheiden. Leer, obwohl THINK
-        # an ist, ist selbst ein Debug-Signal (Reasoning-Parser aus? Grammatik
-        # wuergt das Denken? Denkprozess ins Token-Limit gelaufen?). Wird auch
-        # im Fehlerpfad aufgerufen (mit getattr(e, "thinking", "")), damit ein
-        # verrannter Denkprozess sichtbar ist, statt mit der Exception zu
-        # verschwinden. thinking kommt jetzt aus dem Reply bzw. der Exception,
-        # nicht mehr aus einem Engine-Attribut - das vertraegt parallele Calls.
+        # von "Modell hat nicht gedacht" zu unterscheiden. Leer, obwohl fuer
+        # diesen Call-Typ Denken erwartet war, ist selbst ein Debug-Signal
+        # (Reasoning-Parser aus? Grammatik wuergt das Denken? ins Token-Limit
+        # gelaufen?). Wird auch im Fehlerpfad aufgerufen (mit
+        # getattr(e, "thinking", "")), damit ein verrannter Denkprozess
+        # sichtbar ist, statt mit der Exception zu verschwinden. thinking
+        # kommt aus dem Reply bzw. der Exception, nicht aus einem
+        # Engine-Attribut - das vertraegt parallele Calls.
         thinking = (thinking or "").strip()
         if thinking:
             self._log_block("THINKING", thinking)
-        elif llm.THINK:
-            self._log_block("THINKING", "(leer - kein Denkprozess empfangen)")
-        else:
+        elif not llm.THINK:
             self._log_block("THINKING", "(deaktiviert - AIGAME_THINK=0)")
+        elif call and call not in llm.THINK_CALLS:
+            self._log_block("THINKING",
+                            f"(fuer Call-Typ '{call}' aus - AIGAME_THINK_CALLS)")
+        else:
+            self._log_block("THINKING", "(leer - kein Denkprozess empfangen)")
 
 
 def _log_path(start_prompt: str) -> Path:

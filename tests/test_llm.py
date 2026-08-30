@@ -7,10 +7,12 @@ Kein echter Server: ein FakeLLM fuellt complete() mit festen Antworten.
 import concurrent.futures
 import time
 import unittest
+from unittest import mock
 
 from pydantic import BaseModel
 
 import llm
+from models import Model
 
 
 class Tiny(BaseModel):
@@ -25,7 +27,7 @@ def _bare() -> llm.LLM:
 class ReplyShapeTest(unittest.TestCase):
     def test_structured_returns_reply_with_value_and_metadata(self):
         class E(llm.LLM):
-            def complete(self, messages, schema=None):
+            def complete(self, messages, schema=None, *, think=True):
                 return '{"x": 7}', "some reasoning", 42.0
 
         reply = E().structured([{"role": "user", "content": "hi"}], Tiny)
@@ -36,7 +38,7 @@ class ReplyShapeTest(unittest.TestCase):
 
     def test_rate_is_written_to_the_module_global_for_the_footer(self):
         class E(llm.LLM):
-            def complete(self, messages, schema=None):
+            def complete(self, messages, schema=None, *, think=True):
                 return '{"x": 1}', "", 99.5
 
         E().structured([{"role": "user", "content": "hi"}], Tiny)
@@ -49,7 +51,7 @@ class EmptyResponseTest(unittest.TestCase):
         StructuredError landen - story._log_thinking() liest ihn dort im
         Fehlerpfad (getattr(e, 'thinking', ''))."""
         class E(llm.LLM):
-            def complete(self, messages, schema=None):
+            def complete(self, messages, schema=None, *, think=True):
                 raise llm.EmptyResponse("empty", thinking="ran away in circles")
 
         with self.assertRaises(llm.StructuredError) as cm:
@@ -84,7 +86,7 @@ class ParallelNoClobberTest(unittest.TestCase):
         structured()-Aufrufe gleichzeitig (agentische DECIDE-Faecherung),
         darf keiner den Denk-Trace eines anderen sehen."""
         class E(llm.LLM):
-            def complete(self, messages, schema=None):
+            def complete(self, messages, schema=None, *, think=True):
                 tag = messages[0]["content"]
                 time.sleep(0.05)   # Ueberlappung erzwingen
                 return '{"x": 1}', f"thinking-{tag}", None
@@ -100,6 +102,71 @@ class ParallelNoClobberTest(unittest.TestCase):
 
         for tag, reply in zip(tags, replies):
             self.assertEqual(reply.thinking, f"thinking-{tag}")
+
+
+class ThinkRoutingTest(unittest.TestCase):
+    """structured(call=...) leitet den passenden think-Wert an complete()."""
+
+    def _capture(self):
+        seen = []
+
+        class E(llm.LLM):
+            def complete(self, messages, schema=None, *, think=True):
+                seen.append(think)
+                return '{"x": 1}', "", None
+
+        return E(), seen
+
+    def test_call_type_selects_thinking(self):
+        eng, seen = self._capture()
+        with mock.patch.object(llm, "THINK", True), \
+             mock.patch.object(llm, "THINK_CALLS", {"init", "resolve"}):
+            for c in ("resolve", "decide", "init", "narrate"):
+                eng.structured([{"role": "user", "content": "x"}], Tiny, call=c)
+        self.assertEqual(seen, [True, False, True, False])
+
+    def test_master_switch_off_disables_all(self):
+        eng, seen = self._capture()
+        with mock.patch.object(llm, "THINK", False), \
+             mock.patch.object(llm, "THINK_CALLS", {"init", "resolve", "decide"}):
+            eng.structured([{"role": "user", "content": "x"}], Tiny, call="resolve")
+        self.assertEqual(seen, [False])
+
+    def test_no_label_falls_back_to_master_switch(self):
+        eng, seen = self._capture()
+        with mock.patch.object(llm, "THINK", True):
+            eng.structured([{"role": "user", "content": "x"}], Tiny)
+        self.assertEqual(seen, [True])
+
+
+class VLLMPayloadTest(unittest.TestCase):
+    """VLLM.complete() setzt enable_thinking und das Token-Budget nach dem
+    think-Flag - ohne echten Server (llm._json_post gemockt)."""
+
+    def _payload_for(self, think):
+        captured = {}
+
+        def fake_post(url, payload, timeout):
+            captured["p"] = payload
+            return {"choices": [{"message": {"content": '{"x": 1}'},
+                                 "finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 5}}
+
+        eng = llm.VLLM(Model(backend="vllm", ref="m", label="l"))
+        with mock.patch.object(llm, "_json_post", fake_post):
+            eng.complete([{"role": "user", "content": "x"}],
+                         {"type": "object"}, think=think)
+        return captured["p"]
+
+    def test_thinking_on(self):
+        p = self._payload_for(True)
+        self.assertEqual(p["chat_template_kwargs"], {"enable_thinking": True})
+        self.assertEqual(p["max_tokens"], llm.MAX_TOKENS)
+
+    def test_thinking_off(self):
+        p = self._payload_for(False)
+        self.assertEqual(p["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(p["max_tokens"], llm.NO_THINK_MAX_TOKENS)
 
 
 if __name__ == "__main__":

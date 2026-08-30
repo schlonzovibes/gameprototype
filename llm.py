@@ -140,6 +140,26 @@ def _record_rate(rate: float | None) -> None:
 # Der Vergleich mit einem Tupel erlaubt mehrere Schreibweisen in der env-Var.
 THINK = os.environ.get("AIGAME_THINK", "0").lower() in ("1", "true", "on", "yes")
 
+# Fuer WELCHE Call-Typen der Denkprozess laeuft (nur wenn THINK an ist).
+# Reasoning kostet ~2-4k Token pro Call und dominiert die Rundenzeit. RESOLVE
+# profitiert am meisten (Kollisionsaufloesung, Scheitern-Urteil, neue
+# Raeume/Figuren); INIT legt einmalig die ganze Welt an. DECIDE ist eine
+# kurze, grammatik-enge Entscheidung, NARRATE reine Prosa - beide brauchen
+# den Denkprozess kaum. story.py labelt jeden structured()-Aufruf.
+THINK_CALLS = set(os.environ.get("AIGAME_THINK_CALLS", "init,resolve")
+                  .lower().replace(" ", "").split(","))
+
+# Antwortbudget fuer Calls OHNE Denkprozess. Ein DECIDE-Delta ist ~100
+# Token, ein NARRATE-Text ~250 - die 24k von MAX_TOKENS waeren hier nur ein
+# Sicherheitsnetz gegen einen Runaway, den es ohne Reasoning kaum gibt.
+NO_THINK_MAX_TOKENS = int(os.environ.get("AIGAME_NO_THINK_MAX_TOKENS", "2048"))
+
+
+def _should_think(call: str) -> bool:
+    """Denkt dieser Call-Typ? Ohne Label (Tests, Direktaufrufe) faellt es auf
+    den globalen Schalter zurueck."""
+    return THINK and (not call or call in THINK_CALLS)
+
 # Anteil des GPU-Speichers, den vLLM fuer sich reservieren darf - Gewichte
 # UND KV-Cache zusammen. Auf dem DGX Spark (128 GB gemeinsamer Speicher)
 # entsprechen 0.65 rund 83 GB - der Wert aus dem Arena-Rezept (siehe
@@ -314,8 +334,8 @@ class LLM:
         """
         raise NotImplementedError
 
-    def complete(self, messages: list[dict],
-                 schema: dict | None = None) -> tuple[str, str, float | None]:  # pragma: no cover
+    def complete(self, messages: list[dict], schema: dict | None = None,
+                 *, think: bool = True) -> tuple[str, str, float | None]:  # pragma: no cover
         """Muss jede Unterklasse selbst implementieren.
 
         schema ist ein JSON-Schema. Ist es gesetzt, wird die Antwort nicht
@@ -327,6 +347,10 @@ class LLM:
         Request-Parameter mit, NICHT im Prompt. Es kostet also keine Tokens
         und stoert den Prefix-Cache nicht - der System-Prompt bleibt
         byteweise identisch, egal welches Schema gerade gilt.
+
+        think steuert den Denkprozess FUER DIESEN AUFRUF (structured() leitet
+        _should_think(call) hierher). False -> kein Reasoning, kleineres
+        Token-Budget.
 
         Rueckgabe: (content, thinking, tokens_per_sec). content ist der
         JSON-Text, thinking der abgetrennte Denkprozess (leer, wenn keiner
@@ -340,7 +364,7 @@ class LLM:
         raise NotImplementedError
 
     def structured(self, messages: list[dict], model_cls: type[_T],
-                   retries: int = 1) -> Reply[_T]:
+                   *, call: str = "", retries: int = 1) -> Reply[_T]:
         """Fragen und ein Reply (validiertes Objekt + Metadaten) zurueckbekommen.
 
         Der einzige Weg, auf dem story.py mit einem Modell spricht. Was hier
@@ -367,13 +391,14 @@ class LLM:
 
         schema = model_cls.model_json_schema()  # type: ignore[attr-defined]
         attempt = list(messages)
+        think = _should_think(call)
         thinking = ""   # ueber die Versuche mitgezogen, damit der Denk-Trace
                         # eines verrannten ersten Versuchs im Fehlerpfad nicht
                         # verlorengeht
 
         for remaining in range(retries, -1, -1):
             try:
-                raw, thinking, rate = self.complete(attempt, schema)
+                raw, thinking, rate = self.complete(attempt, schema, think=think)
             except EmptyResponse as e:
                 # Leerer content - fast immer ein Denkprozess, der sich
                 # verrannt hat. Ein blosses Wiederholen liefe genauso; wir
@@ -514,8 +539,8 @@ class Ollama(LLM):
         except Exception:
             return False
 
-    def complete(self, messages: list[dict],
-                 schema: dict | None = None) -> tuple[str, str, float | None]:
+    def complete(self, messages: list[dict], schema: dict | None = None,
+                 *, think: bool = True) -> tuple[str, str, float | None]:
         """Den Verlauf schicken und (content, thinking, tokens_per_sec)
         zurueckbekommen."""
         # Ein dict ist Pythons Woerterbuch: Schluessel -> Wert. Das hier wird
@@ -532,7 +557,7 @@ class Ollama(LLM):
             "format": schema if schema else "json",
             "options": {"temperature": TEMPERATURE, "num_ctx": NUM_CTX},
         }
-        if THINK:
+        if think:
             payload["think"] = True
 
         try:
@@ -542,7 +567,7 @@ class Ollama(LLM):
             # Statt zu scheitern: einmal ohne Denkprozess wiederholen.
             # str(e) macht aus der Exception ihren Text, .lower() macht den
             # Vergleich unabhaengig von Gross-/Kleinschreibung.
-            if not THINK or "does not support thinking" not in str(e).lower():
+            if not think or "does not support thinking" not in str(e).lower():
                 raise   # nacktes "raise" wirft den urspruenglichen Fehler weiter
             payload.pop("think", None)   # Feld entfernen, None = kein Fehler wenn weg
             data = self._post("/api/chat", payload)
@@ -831,8 +856,8 @@ class VLLM(LLM):
 
     # ----------------------------------------------------------- Abfragen
 
-    def complete(self, messages: list[dict],
-                 schema: dict | None = None) -> tuple[str, str, float | None]:
+    def complete(self, messages: list[dict], schema: dict | None = None,
+                 *, think: bool = True) -> tuple[str, str, float | None]:
         payload = {
             "model": self.name,
             "messages": messages,
@@ -846,7 +871,14 @@ class VLLM(LLM):
             "top_p": 0.95,
             "top_k": TOP_K,
             "presence_penalty": PRESENCE_PENALTY,
-            "max_tokens": MAX_TOKENS,
+            # Ohne Denkprozess reicht ein knappes Budget - das Delta/der
+            # Erzaehltext sind klein, und den "finish_reason=length"-Runaway
+            # gibt es ohne Reasoning kaum.
+            "max_tokens": MAX_TOKENS if think else NO_THINK_MAX_TOKENS,
+            # Qwen3.6-Chat-Template: enable_thinking=false haengt ein leeres
+            # <think></think> an, das Modell antwortet sofort. Immer explizit
+            # gesetzt (der Default des Templates waere Denken an).
+            "chat_template_kwargs": {"enable_thinking": think},
         }
         if schema:
             # strict=True heisst: keine zusaetzlichen Felder, keine

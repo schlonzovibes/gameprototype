@@ -65,7 +65,7 @@ class FakeEngine:
         self.fail_on = set(fail_on)
         self.calls: list[str] = []   # model_cls.__name__ je Aufruf
 
-    def structured(self, messages, model_cls, retries=1):
+    def structured(self, messages, model_cls, *, call="", retries=1):
         self.calls.append(model_cls.__name__)
         user = messages[1]["content"]
         for marker in self.fail_on:
@@ -185,7 +185,7 @@ class MultiAgentRoundTest(GameTestCase):
         lock = threading.Lock()
 
         class SlowEngine(FakeEngine):
-            def structured(self, messages, model_cls, retries=1):
+            def structured(self, messages, model_cls, *, call="", retries=1):
                 self.calls.append(model_cls.__name__)
                 if model_cls.__name__ == "Decide":
                     with lock:
@@ -208,7 +208,7 @@ class MultiAgentRoundTest(GameTestCase):
 
     def test_agent_killed_by_an_earlier_agent_is_skipped(self):
         class KillEngine(FakeEngine):
-            def structured(self, messages, model_cls, retries=1):
+            def structured(self, messages, model_cls, *, call="", retries=1):
                 self.calls.append(model_cls.__name__)
                 user = messages[1]["content"]
                 if model_cls.__name__ == "ResolveAgentic" and "ACTING: c1" in user:
@@ -299,7 +299,7 @@ class QuotaNotbremseTest(GameTestCase):
         (1 Figur bis Zug 5) - die Schleife bricht nach dem ersten Versuch
         ab, und die Notbremse legt KEINEN zusaetzlichen Fallback an."""
         class OneCharacterEngine(FakeEngine):
-            def structured(self, messages, model_cls, retries=1):
+            def structured(self, messages, model_cls, *, call="", retries=1):
                 self.calls.append(model_cls.__name__)
                 if model_cls.__name__ == "ResolvePlayer":
                     NC = model_cls.model_fields["characters_introduced"].annotation.__args__[0]
