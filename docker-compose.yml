@@ -57,6 +57,13 @@ services:
       # terminiert dann schlechter und verrennt sich bis MAX_TOKENS. 0.6 ist
       # Qwens Empfehlung fuer den Thinking-Modus.
       AIGAME_TEMPERATURE: "0.6"
+      # Presence-Penalty (nur vLLM): Qwens explizites Gegenmittel gegen
+      # endlose Wiederholungen im Denkprozess - genau der Fehlerfall, bei dem
+      # sich das Denken in "Let's go with X... or Y... actually Z..." im
+      # Kreis dreht, bis MAX_TOKENS reisst und "vLLM returned an empty
+      # response (finish_reason=length)" kommt. 1.5 ist Qwens Vorschlag bei
+      # sichtbaren Schleifen. Deutlich hoeher -> Sprachmischung. 0 = aus.
+      AIGAME_PRESENCE_PENALTY: "1.5"
       # Anteil des gemeinsamen Speichers fuer vLLM (Gewichte + KV-Cache).
       # 0.65 von 128 GB sind rund 83 GB (Wert aus dem Arena-Rezept); der
       # grosszuegige Rest bleibt fuers Bildmodell, das danach geladen wird.

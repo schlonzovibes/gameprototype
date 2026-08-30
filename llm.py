@@ -91,6 +91,21 @@ MAX_TOKENS = int(os.environ.get("AIGAME_MAX_TOKENS", "24576"))
 # und laesst die Erzaehlung immer noch lebendig genug.
 TEMPERATURE = float(os.environ.get("AIGAME_TEMPERATURE", "0.6"))
 
+# Presence-Penalty: flacher Malus auf jedes Token, das im Kontext schon
+# einmal vorkam. Qwen3 nennt genau das als Mittel gegen "endlose
+# Wiederholungen" im Thinking-Modus - und exakt das war der Fehlerfall:
+# der Denkprozess drehte sich in "Let's go with X... or Y... actually Z..."
+# im Kreis, bis MAX_TOKENS riss und der content leer blieb
+# ("finish_reason=length"). 1.5 ist Qwens Vorschlag, wenn man Schleifen
+# sieht; deutlich hoeher kann Sprachmischung ausloesen. 0 schaltet es ab.
+PRESENCE_PENALTY = float(os.environ.get("AIGAME_PRESENCE_PENALTY", "1.5"))
+
+# top_k / min_p: der Rest von Qwens empfohlenem Sampling fuer den Thinking-
+# Modus (top_k 20, min_p 0). Schneidet den unwahrscheinlichen Schwanz weg,
+# an dem sich der Denkprozess sonst festhakt. Nur vLLM - Ollama nimmt beide
+# ueber options entgegen, aber der Fehlerfall lag ausschliesslich bei vLLM.
+TOP_K = int(os.environ.get("AIGAME_TOP_K", "20"))
+
 # Zuletzt gemessene Generierungsrate (Tokens/Sekunde) der juengsten
 # complete()-Anfrage - nur fuer die Footer-Anzeige (ui.py liest das). None =
 # es lief noch keine Inferenz. structured() ruft complete() ggf. mehrfach
@@ -744,11 +759,15 @@ class VLLM(LLM):
             "model": self.name,
             "messages": messages,
             "temperature": TEMPERATURE,
-            # top_p 0.95 ist der zweite Teil von Qwens Sampling-Empfehlung
-            # fuer den Thinking-Modus - schneidet den langen Rattenschwanz
-            # unwahrscheinlicher Tokens ab, an dem sich der Denkprozess sonst
-            # gern verheddert.
+            # Qwens vollstaendige Sampling-Empfehlung fuer den Thinking-Modus:
+            # top_p 0.95, top_k 20 - schneiden den unwahrscheinlichen Schwanz
+            # weg, an dem sich der Denkprozess verheddert. presence_penalty
+            # ist Qwens explizites Gegenmittel gegen endlose Wiederholungen
+            # (siehe PRESENCE_PENALTY oben) - der eigentliche Hebel gegen den
+            # "finish_reason=length"-Fehlerfall.
             "top_p": 0.95,
+            "top_k": TOP_K,
+            "presence_penalty": PRESENCE_PENALTY,
             "max_tokens": MAX_TOKENS,
         }
         if schema:
