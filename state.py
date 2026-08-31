@@ -116,6 +116,15 @@ class Character:
     # item_moves im Resolve-Delta gefuellt/geleert; in render_for() nur der
     # Figur selbst gezeigt, in render() allen.
     inventory: list[str] = field(default_factory=list)
+    # Die letzten (bis zu 3) aims dieser Figur - in render_for() sichtbar,
+    # damit die Figur ihren eigenen Loop erkennt ("ich frage seit 5 Runden
+    # dasselbe, nur anders formuliert"). story.advance pflegt die Liste.
+    aim_history: list[str] = field(default_factory=list)
+    # Wie oft in Folge die neu gesetzte aim der vorigen im Kern glich
+    # (Wort-Ueberlappung). story.advance zaehlt hoch/setzt zurueck;
+    # render_for() blendet ab >=2 eine harte Loop-Bremse ein. Prosa allein
+    # reicht bei dem kleinen Modell nicht (Playtest R4G3: aim 9x identisch).
+    aim_stale: int = 0
 
 
 class RoundEntry(NamedTuple):
@@ -356,6 +365,37 @@ class World:
         node = self.nodes.get(node_id)
         return tuple(e.to for e in node.exits) if node else ()
 
+    def path_step(self, frm: str, to: str) -> str | None:
+        """Der ERSTE Hop auf dem kuerzesten gerichteten Weg frm -> to.
+
+        None, wenn frm == to, das Ziel unbekannt ist oder kein Weg fuehrt
+        (z.B. nur ueber eine Einbahn erreichbar, aus der es kein Zurueck
+        gibt). apply_turn benutzt das, damit actor_move_to ein beliebiges
+        Ziel nennen darf und die Figur trotzdem nur einen Raum pro Runde
+        weiterkommt - mehrzuegige Wege laufen dann ueber mehrere Runden.
+        """
+        if frm == to or to not in self.nodes or frm not in self.nodes:
+            return None
+        prev: dict[str, str] = {}
+        frontier = [frm]
+        seen = {frm}
+        while frontier:
+            nxt_frontier: list[str] = []
+            for node in frontier:
+                for adj in self.exits_from(node):
+                    if adj in seen:
+                        continue
+                    seen.add(adj)
+                    prev[adj] = node
+                    if adj == to:
+                        step = adj
+                        while prev[step] != frm:
+                            step = prev[step]
+                        return step
+                    nxt_frontier.append(adj)
+            frontier = nxt_frontier
+        return None
+
     # ------------------------------------------------------------ Wachstum
 
     def can_grow(self) -> bool:
@@ -555,6 +595,31 @@ class World:
             # setzt statt in der Spielsprache.
             f"LANGUAGE: say your lines (utterance) in {self.language}",
         ]
+        # Direktiv, nicht als Selbst-Frage: das Modell hat in Tests jede
+        # umformulierte aim als "kein Loop" schoengeredet. Nur die
+        # ABGESCHLOSSENEN aims (nicht die laufende CURRENT AIM) - eine aim,
+        # die legitim noch laeuft (z.B. ein mehrzuegiger Weg), soll nicht
+        # faelschlich als "verbraucht" gelten.
+        tried = [a for a in char.aim_history if a]
+        if char.aim_stale >= 2:
+            lines.append(
+                "YOU ARE STUCK. You have set essentially the same aim "
+                f"{char.aim_stale + 1} turns running - the client has "
+                "counted the words. It is NOT working and it will not start "
+                "working. This turn you may NOT pursue that thing at all, "
+                "not even reworded. Do something else entirely: drop it out "
+                "loud and say why, leave the room, sit down, go quiet, ask "
+                "about something unrelated, or turn to your own part of the "
+                "problem and just do it. Your new aim must be about a "
+                "DIFFERENT action.")
+        elif tried:
+            lines.append(
+                "ROUTES YOU HAVE ALREADY TRIED - your new aim may NOT be "
+                "another run at any of these, however reworded. They are "
+                "spent. If what you wanted is done, accept it and want "
+                "something new; if it is not going to happen this way, drop "
+                "it and deal with what is actually in front of you:")
+            lines.extend(f"  - {a}" for a in tried)
         if char.is_agentic and char.hidden_target:
             lines.append(f"YOUR HIDDEN AIM RELATES TO: {char.hidden_target}")
         # Die Story-Richtung geht an JEDE Figur (nicht nur die agentische):
@@ -738,6 +803,7 @@ class World:
         """
         rejected: list[str] = []
         actor_node = self._actor_node_id(actor_id)
+        new_room_id: str | None = None   # vom Spieler diese Runde erzeugt
 
         # --- Neuer Raum (ZUERST, siehe schema.resolve_model) ---
         # Ein neuer Raum kann in actor_move_to gar nicht als Ziel auftauchen
@@ -755,20 +821,32 @@ class World:
                     justification=delta.new_room.justification)
                 if actor_id == "player":
                     self.player_at = new_id
+                    new_room_id = new_id
                 else:
                     self.characters[actor_id].at = new_id
             else:
                 rejected.append(
                     f"new_room: max_nodes ({self.max_nodes}) reached, discarded")
-        elif delta.actor_move_to != "stay":
-            if delta.actor_move_to in self.exits_from(actor_node):
+        elif delta.actor_move_to not in ("stay", actor_node):
+            # actor_move_to == actor_node heisst "hier bleiben" - keine
+            # Bewegung. Sonst ist actor_move_to das ZIEL (irgendein Knoten,
+            # nicht nur ein Nachbar): path_step macht daraus den Ein-Schritt-
+            # Zug, mehrzuegige Wege laufen ueber mehrere Runden.
+            dest = delta.actor_move_to
+            step = (dest if dest in self.exits_from(actor_node)
+                    else self.path_step(actor_node, dest))
+            if step:
                 if actor_id == "player":
-                    self.player_at = delta.actor_move_to
+                    self.player_at = step
                 else:
-                    self.characters[actor_id].at = delta.actor_move_to
+                    self.characters[actor_id].at = step
+                if step != dest:
+                    rejected.append(
+                        f"{actor_id} {actor_node} -> {dest}: nicht adjazent, "
+                        f"Schritt nach {step}")
             else:
                 rejected.append(
-                    f"{actor_id} {actor_node} -> {delta.actor_move_to}: no such exit")
+                    f"{actor_id} {actor_node} -> {dest}: kein Weg")
 
         # --- Bewegungen ANDERER Figuren ---
         # actor_id selbst ist hier bewusst ausgeschlossen: die eigene
@@ -787,10 +865,23 @@ class World:
                 rejected.append(f"move {move.character}: unknown character")
             elif char.status != "active":
                 rejected.append(f"move {char.id} -> {move.to}: {char.status}")
-            elif move.to not in self.exits_from(char.at):
-                rejected.append(f"move {char.id} {char.at} -> {move.to}: no such exit")
             else:
-                char.at = move.to
+                # Reist die Figur mit dem Spieler in einen Raum, den er
+                # DIESE Runde erst erzeugt hat, kann das Modell dessen Id in
+                # move.to gar nicht kennen (sie existierte beim Grammatikbau
+                # nicht). Ein move-Eintrag neben einem neuen Spielerraum
+                # heisst deshalb "kommt mit" - Ziel ist der neue Raum.
+                target = new_room_id if new_room_id else move.to
+                # wie actor_move_to: target ist das ZIEL, path_step macht den
+                # Ein-Schritt-Zug (so kann eine mitreisende Figur denselben
+                # fernen Zielknoten wie der Spieler bekommen).
+                step = (target if target in self.exits_from(char.at)
+                        else self.path_step(char.at, target))
+                if step:
+                    char.at = step
+                else:
+                    rejected.append(
+                        f"move {char.id} {char.at} -> {target}: kein Weg")
 
         # --- Zustandswechsel ---
         # NACH den Bewegungen: so darf eine Figur im selben Zug noch
@@ -867,12 +958,18 @@ class World:
                 # Negativer Index zaehlt von hinten: die letzten N behalten.
                 del c.memory[:-MEMORY_LIMIT]
 
-            # player_was_at NACH der Bewegung dieses Akteurs gelesen (siehe
-            # oben) - bewegt sich der Spieler in diesem Zug, gilt fuer seine
-            # EIGENEN Events schon die neue Position, exakt "zum Zeitpunkt
-            # des Events".
+            # visible() laesst ein Event durch, wenn e.node == e.player_was_at.
+            # Fuer die EIGENEN Events des Spielers heisst das: immer sichtbar,
+            # egal in welchem Raum sie getaggt sind - der Spieler hat alles
+            # miterlebt, was er selbst diese Runde getan/gesagt hat, auch die
+            # Zeile, die er im gerade verlassenen Raum noch gesprochen hat
+            # (sonst verschwindet "redet + geht" aus der Narration, Playtest
+            # R3G1). Fuer NPC-Events bleibt es der echte Spielerort - der
+            # Spieler sieht einen NPC nur, wenn er bei ihm steht.
+            player_was_at = (event.node if actor_id == "player"
+                             else self.player_at)
             self.round_log.append(
-                RoundEntry(actor_id, event.node, event.clause, self.player_at))
+                RoundEntry(actor_id, event.node, event.clause, player_was_at))
 
         if len(delta.events) > MAX_EVENTS:
             rejected.append(

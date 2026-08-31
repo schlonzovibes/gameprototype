@@ -56,7 +56,7 @@ class DecideModelTest(unittest.TestCase):
 
 class ResolveModelTest(unittest.TestCase):
     def test_player_mode_has_characters_introduced(self):
-        Player = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "player")
+        Player = schema.resolve_model(("n1", "n2"), ("c1",), "player")
         self.assertIn("characters_introduced", Player.model_fields)
 
     def test_agentic_mode_has_no_characters_introduced(self):
@@ -64,11 +64,11 @@ class ResolveModelTest(unittest.TestCase):
         Nebenschauplatz der agentischen Figur (Brief 5.1) - das Feld
         existiert bei mode="agentic" im Schema gar nicht, nicht bloss
         leer."""
-        Agentic = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "agentic")
+        Agentic = schema.resolve_model(("n1", "n2"), ("c1",), "agentic")
         self.assertNotIn("characters_introduced", Agentic.model_fields)
 
     def test_field_order_player(self):
-        Player = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "player")
+        Player = schema.resolve_model(("n1", "n2"), ("c1",), "player")
         self.assertEqual(
             list(Player.model_fields.keys()),
             ["new_room", "actor_move_to", "moves", "status_changes",
@@ -76,7 +76,7 @@ class ResolveModelTest(unittest.TestCase):
              "item_moves"])
 
     def test_field_order_agentic(self):
-        Agentic = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "agentic")
+        Agentic = schema.resolve_model(("n1", "n2"), ("c1",), "agentic")
         self.assertEqual(
             list(Agentic.model_fields.keys()),
             ["new_room", "actor_move_to", "moves", "status_changes",
@@ -85,14 +85,14 @@ class ResolveModelTest(unittest.TestCase):
     def test_item_move_target_literal(self):
         """item_moves.to nimmt Figuren-Ids, Knoten-Ids und die Sonderwerte
         'player'/'gone' - nichts sonst."""
-        Player = schema.resolve_model(("n1", "n2"), ("c1",), ("n2",), "player")
+        Player = schema.resolve_model(("n1", "n2"), ("c1",), "player")
         ItemMove = Player.model_fields["item_moves"].annotation.__args__[0]
         self.assertEqual(list(ItemMove.model_fields.keys()), ["item", "to"])
         enum = ItemMove.model_json_schema()["properties"]["to"]["enum"]
         self.assertEqual(set(enum), {"c1", "n1", "n2", "player", "gone"})
 
     def test_new_character_has_carries(self):
-        Player = schema.resolve_model(("n1",), ("c1",), ("n1",), "player")
+        Player = schema.resolve_model(("n1",), ("c1",), "player")
         NC = Player.model_fields["characters_introduced"].annotation.__args__[0]
         self.assertIn("carries", NC.model_fields)
 
@@ -100,24 +100,29 @@ class ResolveModelTest(unittest.TestCase):
         """Regression fuer die Optional-Korrektur ggue. dem Brief-Wortlaut:
         new_room ist ein Pflichtfeld (leerer name-String signalisiert
         "keiner"), kein echtes Optional/None-Feld."""
-        Player = schema.resolve_model(("n1",), ("c1",), ("n1",), "player")
+        Player = schema.resolve_model(("n1",), ("c1",), "player")
         self.assertTrue(Player.model_fields["new_room"].is_required())
         schema_dict = Player.model_json_schema()
         # Kein "anyOf"/null-Branch im generierten JSON-Schema fuer new_room.
         new_room_schema = schema_dict["properties"]["new_room"]
         self.assertNotIn("anyOf", new_room_schema)
 
-    def test_actor_move_to_limited_to_actor_exits(self):
-        """actor_move_to darf NUR die uebergebenen Ausgaenge des Akteurs
-        annehmen, nicht jeden Knoten der Welt."""
-        Player = schema.resolve_model(("n1", "n2", "n3"), ("c1",), ("n2",), "player")
+    def test_actor_move_to_accepts_any_node(self):
+        """actor_move_to nennt das ZIEL (irgendein Knoten) - World.apply_turn
+        macht daraus den Ein-Schritt-Zug. Frueher war es auf die Nachbar-
+        Exits verengt, dann konnte das Modell ein 2-Hop-Ziel nicht
+        ausdruecken (Playtest R3)."""
+        Player = schema.resolve_model(("n1", "n2", "n3"), ("c1",), "player")
         enum = Player.model_json_schema()["properties"]["actor_move_to"]["enum"]
-        self.assertEqual(set(enum), {"n2", "stay"})
+        self.assertEqual(set(enum), {"n1", "n2", "n3", "stay"})
+        Agentic = schema.resolve_model(("n1", "n2", "n3"), ("c1",), "agentic")
+        enum = Agentic.model_json_schema()["properties"]["actor_move_to"]["enum"]
+        self.assertEqual(set(enum), {"n1", "n2", "n3", "stay"})
 
     def test_builds_without_characters(self):
         """Keine aktiven Figuren (char_ids leer) - darf nicht mit
         Literal[()]-TypeError abstuerzen."""
-        Agentic = schema.resolve_model(("n1",), (), ("n1",), "agentic")
+        Agentic = schema.resolve_model(("n1",), (), "agentic")
         Agentic.model_json_schema()
 
 

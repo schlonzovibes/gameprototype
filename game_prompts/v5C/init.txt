@@ -32,6 +32,15 @@ corridor, the room through that one door, the yard outside. Depth one only:
 do not lay out a whole building. Anywhere further off does not exist yet and
 appears later, when the player goes looking.
 
+If the premise happens inside a vehicle - a car, a train compartment, a
+boat, a lift - the FIRST node IS that vehicle's interior, and it stays the
+setting for the whole drive: do NOT also make a "road", a "car park", a
+"platform", a "hard shoulder" as separate rooms to walk between. Those are
+not places the player moves through; the vehicle carries them. The other
+2-3 nodes are then somewhere the vehicle is going or has come from (the
+clinic entrance, the harbour, the house) - a real destination, not a
+stretch of road. Arriving there happens in one move when the trip is done.
+
 For each room:
 
     name    a short place name, in the language of the start prompt.
@@ -67,11 +76,30 @@ asking for help, an old disagreement, a search for the truth. Give the
 player someone that story needs: a colleague, a relative, a client,
 someone who needs something from the player, someone the player needs
 something from, a stranger who was already here, the person the premise is
-about. Match the person to the premise, not to a generic version of the
-place - a "secret agent in a fast-food restaurant" does not open on a shift
-supervisor who wants the tables wiped, and a "visit to a dying friend" does
-not open on a brisk nurse with a schedule to keep. If the start prompt
-hands you a named person or a stated want, use exactly that.
+about.
+
+If the premise's central figure is not an ordinary person - a talking
+book, a ghost, an animal, a machine, a stranger with an impossible claim -
+THAT is your first starting character, with a real agenda of its own. Do
+not leave it as a background effect and put a mundane person in the
+foreground.
+
+If you place a second person, do NOT make them a functionary whose whole
+role is a deadline plus a checklist for the player ("process this before
+the inspectors come", "sign the form", "note each item, then..."). That
+same character has turned up in test after test. Give the second person a
+personal stake that pulls against the first, not a procedure.
+
+A good second person has their own thing at risk in THIS moment and simply
+wants it to go a different way than the first person does - someone who
+comes off worse if the first one gets what they want. Not a keeper of the
+clock, not "we have to be done before X gets here", not someone whose lines
+would mostly be instructions to the player.
+
+Match the person to the premise, not to a generic version of the place - a
+"secret agent in a fast-food restaurant" does not open on a shift
+supervisor who wants the tables wiped. If the start prompt hands you a
+named person or a stated want, use exactly that.
 
 For each:
 
@@ -79,10 +107,16 @@ For each:
                      prompt. Not "the guard", not "a clown" - a name.
     agenda_draft     English, one sentence: the OUTCOME this person wants,
                      that the player can help toward or stand in the way of.
-                     A state of the world, not an order to the player. "she
-                     wants her mother to eat something before the nurse
-                     comes" - NOT "she wants the player to feed her mother".
-                     It must be tied to what the premise puts at stake, and
+                     A state of the world, NOT an order to the player and NOT
+                     a wish about what the player should do. "she wants her
+                     mother to eat something before the nurse comes" - NOT
+                     "she wants the player to feed her mother". "he wants the
+                     licence handed in today without having to be the one who
+                     starts it" - NOT "he wants his son to pick up the key".
+                     If your sentence has "the player" / "his son" / "her
+                     daughter" as the thing being moved, rewrite it as a
+                     world-state. It must be tied to what the premise puts at
+                     stake, and
                      cut so the SITUATION keeps developing across fifteen
                      scenes - it does not have to be a fight, it has to stay
                      alive - not a chore that is finished by scene two.
@@ -100,7 +134,9 @@ No backstory, no psychology - physical and checkable, like the rooms.
 If you place two people, their agendas relate to each other and to the
 premise: they want different things, or the same thing in ways that do not
 fit together, so the player keeps having to choose. Never the same want
-written twice, and never two unrelated errands.
+written twice, and never two unrelated errands. The second person is a
+person with their own stake - not a rules-lawyer whose whole role is to
+tell the player which procedure to follow or which form to sign.
 
 --------------------------------------------------
 4. THE DIRECTION
@@ -131,6 +167,14 @@ room.
 If your pull contains words like trust, authority, respect, control,
 standing, proving, foothold, or "the test" - it is too abstract. Throw it
 out and name the concrete thing those abstractions are really about.
+
+The other failure is naming the nearest PROP instead of the thing the
+premise turns on. Premise: a machine that has woken up is to be wiped at
+six. The pull is "whether the wipe happens" (a yes/no that lands) - NOT
+"the replacement drive in its case", which is just hardware in the room.
+Premise: a stranger needs a part forged by dawn. The pull is "the finished
+part in her hand" - not "the sketch on the bench". Name the outcome the
+whole scene bends toward, or the one object whose fate IS that outcome.
 
 The player's own stated goal (why they came) is not itself the pull - but
 the pull must be what that goal is chasing in this room, not a side matter.

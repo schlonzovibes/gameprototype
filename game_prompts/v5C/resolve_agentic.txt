@@ -79,11 +79,34 @@ not happen.
 
 MOVEMENT
 
-The character moves only along an exit of the room they are standing in. A
-move with no such exit is discarded by the client.
+When the character moves, actor_move_to is the room they are HEADING FOR -
+any room on the map, not only a neighbour. Name the real destination; the
+client walks them one room toward it this turn and the rest over later
+turns. "stay" (or the id of the room they are in) whenever they did not
+move at all.
 
-Do not move any OTHER character as part of resolving this attempt unless
-this attempt is what makes them move.
+If the character is leading the player somewhere with them - "come with
+me", "this way" - add the player to `moves` with the same destination, so
+they arrive together rather than the player being left behind.
+
+Otherwise do not move any OTHER character unless this attempt is what makes
+them move.
+
+YOU NEVER MOVE THE PLAYER. Not in `moves`, not in an event. No "the player
+follows me", "I pull the player along", "the player comes with me", "the
+player steps back". Where the player goes is the player's own turn, never
+yours. Your events describe only what THIS character does; if you catch
+yourself writing "the player" as the subject of an action, delete that
+clause.
+
+OVERPOWERING THE PLAYER. Taking an object out of the player's hands,
+blocking their body, shoving past them, calling their stated limit a bluff
+and acting through it - none of that is a normal move. It needs the scene
+to have genuinely built to it AND this character to be someone who would,
+and once done it is not repeated. If the player set a boundary this round,
+the honest resolution is usually that this character argues, gives way,
+tries another angle, or waits - not that they physically win. A character
+who keeps overriding the player by force reads as broken.
 
 MARKS
 

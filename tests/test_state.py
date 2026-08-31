@@ -77,20 +77,28 @@ class RenderForTest(unittest.TestCase):
 
 
 class ApplyTurnMoveTest(unittest.TestCase):
-    """Eine Bewegung ohne echte Kante wird abgelehnt."""
+    """Eine Bewegung ohne erreichbaren Weg wird abgelehnt, die Figur bleibt
+    stehen. Ein erreichbares fernes Ziel bewegt die Figur einen Schritt."""
 
-    def test_rejects_move_without_edge(self):
+    def test_rejects_move_to_unreachable_node(self):
         world = _world()
+        # n3 ist isoliert (kein Weg von n1).
         rejected = world.apply_turn("player", _delta(actor_move_to="n3"))
         self.assertEqual(world.player_at, "n1")
-        self.assertTrue(any("no such exit" in r for r in rejected), rejected)
+        self.assertTrue(any("kein Weg" in r for r in rejected), rejected)
 
-    def test_npc_move_without_edge_is_rejected_too(self):
+    def test_npc_move_to_unreachable_node_is_rejected_too(self):
         world = _world()
         # c2 steht an n3, das hat gar keinen Ausgang.
         rejected = world.apply_turn("c2", _delta(actor_move_to="n1"))
         self.assertEqual(world.characters["c2"].at, "n3")
-        self.assertTrue(any("no such exit" in r for r in rejected), rejected)
+        self.assertTrue(any("kein Weg" in r for r in rejected), rejected)
+
+    def test_adjacent_move_still_works(self):
+        world = _world()
+        rejected = world.apply_turn("player", _delta(actor_move_to="n2"))
+        self.assertEqual(world.player_at, "n2")
+        self.assertEqual(rejected, [])
 
     def test_moves_cannot_target_the_acting_character(self):
         world = _world()
@@ -144,6 +152,21 @@ class VisibleTest(unittest.TestCase):
 
     def test_empty_log_stays_empty(self):
         self.assertEqual(visible([]), [])
+
+    def test_player_own_events_stay_visible_after_moving_away(self):
+        """Redet + geht in einer Runde: die Zeile faellt im verlassenen Raum,
+        der Spieler steht danach woanders - trotzdem muss NARRATE sie sehen
+        (Playtest R3G1: sonst verschwindet die halbe Szene)."""
+        world = _chain_world()
+        say = types.SimpleNamespace(node="n1", clause='The player says: "Tschuess."')
+        world.apply_turn("player", _delta(
+            actor_move_to="n2",
+            events=[say, types.SimpleNamespace(
+                node="n2", clause="The player steps into the drive.")]))
+        self.assertEqual(world.player_at, "n2")
+        clauses = [e.clause for e in visible(world.round_log)]
+        self.assertIn('The player says: "Tschuess."', clauses)
+        self.assertIn("The player steps into the drive.", clauses)
 
 
 class WorldCopyTest(unittest.TestCase):
@@ -603,6 +626,109 @@ class PlayerStrandedTest(unittest.TestCase):
                        justification="the gate locked behind you")
         world.player_at = "n4"
         self.assertTrue(world.player_stranded())
+
+
+class ActorMoveToCurrentNodeTest(unittest.TestCase):
+    """actor_move_to == der aktuelle Knoten heisst 'hier bleiben', keine
+    Bewegung, keine Ablehnung."""
+
+    def test_current_node_is_treated_as_stay(self):
+        world = _world()                       # Spieler @ n1, Exits: n2
+        rej = world.apply_turn("player", _delta(actor_move_to="n1"))
+        self.assertEqual(world.player_at, "n1")
+        self.assertEqual(rej, [])
+
+    def test_real_exit_still_moves(self):
+        world = _world()
+        world.apply_turn("player", _delta(actor_move_to="n2"))
+        self.assertEqual(world.player_at, "n2")
+
+
+def _chain_world():
+    """n1 -> n2 -> n3 -> n4 (alle zweiseitig ausser n3->n4 einbahn).
+    Spieler an n1, c1 an n1, c2 an n4."""
+    def ex(*tos):
+        return [Exit(to=t, one_way=False, justification="") for t in tos]
+    return World(
+        language="en",
+        nodes={
+            "n1": Node(id="n1", name="Garage", anchor="a", exits=ex("n2")),
+            "n2": Node(id="n2", name="Drive", anchor="b", exits=ex("n1", "n3")),
+            "n3": Node(id="n3", name="Street", anchor="c",
+                       exits=[Exit(to="n2", one_way=False, justification=""),
+                              Exit(to="n4", one_way=True,
+                                   justification="the door only opens outward")]),
+            "n4": Node(id="n4", name="Office", anchor="d", exits=ex()),
+        },
+        characters={
+            "c1": Character(id="c1", name="Dad", at="n1",
+                            agenda="get it done", aim=""),
+            "c2": Character(id="c2", name="Clerk", at="n4",
+                            agenda="close up", aim=""),
+        },
+        facts=[],
+        player_at="n1",
+    )
+
+
+class PathStepTest(unittest.TestCase):
+    def test_adjacent_returns_neighbour(self):
+        w = _chain_world()
+        self.assertEqual(w.path_step("n1", "n2"), "n2")
+
+    def test_two_hops_returns_first_hop(self):
+        w = _chain_world()
+        self.assertEqual(w.path_step("n1", "n3"), "n2")
+
+    def test_three_hops_returns_first_hop(self):
+        w = _chain_world()
+        self.assertEqual(w.path_step("n1", "n4"), "n2")
+
+    def test_same_node_is_none(self):
+        self.assertIsNone(_chain_world().path_step("n2", "n2"))
+
+    def test_unknown_target_is_none(self):
+        self.assertIsNone(_chain_world().path_step("n1", "n9"))
+
+    def test_no_way_back_over_one_way_is_none(self):
+        w = _chain_world()          # n3 -> n4 ist Einbahn
+        self.assertIsNone(w.path_step("n4", "n1"))
+
+
+class MultiHopMoveTest(unittest.TestCase):
+    def test_player_named_far_destination_moves_one_hop(self):
+        w = _chain_world()
+        rej = w.apply_turn("player", _delta(actor_move_to="n4"))
+        self.assertEqual(w.player_at, "n2")           # ein Schritt Richtung n4
+        self.assertTrue(any("nicht adjazent" in r for r in rej), rej)
+
+    def test_reaches_destination_over_several_turns(self):
+        w = _chain_world()
+        for expected in ("n2", "n3", "n4"):
+            w.apply_turn("player", _delta(actor_move_to="n4"))
+            self.assertEqual(w.player_at, expected)
+
+    def test_companion_travels_with_player_via_moves(self):
+        w = _chain_world()
+        # Spieler nimmt c1 mit zum selben fernen Ziel.
+        move = types.SimpleNamespace(character="c1", to="n4")
+        w.apply_turn("player", _delta(actor_move_to="n4", moves=[move]))
+        self.assertEqual(w.player_at, "n2")
+        self.assertEqual(w.characters["c1"].at, "n2")   # zusammen gereist
+
+    def test_companion_follows_player_into_a_new_room(self):
+        """Spieler erzeugt einen Raum und nimmt c1 mit - das Modell kann die
+        neue Id in move.to nicht kennen, ein move-Eintrag heisst trotzdem
+        'kommt mit' (Playtest R4G1: Begleiter blieb sonst zurueck)."""
+        w = _chain_world()
+        w.characters["c1"].at = "n1"           # bei uns
+        new_room = types.SimpleNamespace(
+            name="Waldweg", anchor="needles", one_way=False, justification="")
+        move = types.SimpleNamespace(character="c1", to="n2")   # veraltete Id
+        w.apply_turn("player", _delta(
+            new_room=new_room, actor_move_to="stay", moves=[move]))
+        self.assertEqual(w.nodes[w.player_at].name, "Waldweg")
+        self.assertEqual(w.characters["c1"].at, w.player_at)   # mitgekommen
 
 
 class StatusChangeRobustTest(unittest.TestCase):

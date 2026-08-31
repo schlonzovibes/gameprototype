@@ -173,8 +173,12 @@ def init_model() -> type[BaseModel]:
             description="scene 1, in the language of the start prompt, "
                         "second person, 60-120 words. Describe ONLY the "
                         "start room (the first in `nodes`) and the people in "
-                        "it - not the connected rooms. No player action has "
-                        "happened yet, so nothing here may react to one.")
+                        "it - not the connected rooms. Open on a person or "
+                        "the one thing the scene turns on; do NOT open on or "
+                        "mention the air, a smell, a hum, the light, or 'the "
+                        "silence'. No player action has happened yet, so "
+                        "nothing here may react to one. End the text with a "
+                        "complete sentence.")
         opening_image_prompt: str = Field(
             description="English image description of the opening scene: "
                         "place, light, materials, perspective, and anyone "
@@ -225,7 +229,6 @@ def decide_model(node_ids: tuple[str, ...]) -> type[BaseModel]:
 
 
 def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
-                  actor_exits: tuple[str, ...],
                   mode: Literal["player", "agentic"]) -> type[BaseModel]:
     """Das Zustandsdelta EINES Akteurzuges, samt der Ereignisse, die er
     hinterlaesst - und, bei mode="player", der Raeume/Figuren, die dabei
@@ -250,12 +253,14 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
     Szene 2 - GENAU SO wenig waechst sie mit der Anzahl der Knoten: neue
     Raeume erhoehen node_ids fuer den NAECHSTEN Aufruf, nicht dieses Schema.
 
-    actor_exits sind die Ausgaenge des Knotens, an dem der AKTUELL handelnde
-    Akteur GERADE steht (Spieler oder die eine agentische Figur) - anders
-    als bei Move.to (andere Figuren stehen woanders, ein gemeinsames
-    Literal waere dort nicht moeglich) kennen wir die Position des Akteurs
-    beim Bauen der Grammatik bereits genau. actor_move_to bekommt deshalb
-    sein eigenes, engeres Literal statt des allgemeinen MoveTo.
+    actor_move_to darf JEDEN bestehenden Knoten nennen, nicht nur die
+    Nachbarn: das Modell gibt das ZIEL an ("ich will zum Amt"), und
+    World.apply_turn rechnet daraus den Ein-Schritt-Zug auf dem kuerzesten
+    Weg (path_step). Frueher war das Literal auf die Nachbar-Exits verengt;
+    dann konnte das Modell ein 2-Hop-Ziel gar nicht ausdruecken, xgrammar
+    erzwang einen Zufalls-Exit oder "stay", und Figuren blieben kleben oder
+    teleportierten. Mehrzuegige Wege laufen jetzt einfach ueber mehrere
+    Runden.
     """
     # Literal[()] wirft einen TypeError - ein leeres Tupel ist keine
     # gueltige Aufzaehlung. Gibt es keine Charaktere (ganz am Spielanfang,
@@ -269,14 +274,16 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
     NodeId = Literal[node_ids]                  # type: ignore[valid-type]
     CharId = Literal[char_ids]                  # type: ignore[valid-type]
     MoveTo = Literal[node_ids + ("stay",)]      # type: ignore[valid-type]
-    ActorMoveTo = Literal[actor_exits + ("stay",)]  # type: ignore[valid-type]
+    ActorMoveTo = Literal[node_ids + ("stay",)]  # type: ignore[valid-type]
     Status = Literal["active", "disabled", "dead"]
 
     class Move(BaseModel):
         model_config = STRICT
         character: CharId = Field(description="who moves")
         to: NodeId = Field(
-            description="target node, must be an exit of where they stand")
+            description="the room they are heading for - any room, not only "
+                        "a neighbour. Not adjacent: they cover one step "
+                        "toward it this turn.")
 
     class Mark(BaseModel):
         model_config = STRICT
@@ -323,8 +330,11 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
         # echtes Optional-Feld waere die einzige Ausnahme von "alle Felder
         # Pflicht, kein Optional" in diesem Schema gewesen.
         name: str = Field(
-            description="in the language of the start prompt. Empty string "
-                        "if you are not proposing a new room this turn.")
+            description="a short place name in the LANGUAGE OF THE START "
+                        "PROMPT (same language as the room names you were "
+                        "given - never English unless the game itself is in "
+                        "English). Empty string if you are not proposing a "
+                        "new room this turn.")
         anchor: str = Field(
             description="permanent physical description in English, only "
                         "nameable/touchable things. Empty string if name is "
@@ -339,11 +349,10 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
 
     # Feldreihenfolge ist Generierungsreihenfolge (siehe Modul-Docstring):
     # new_room ZUERST - er entscheidet, ob actor_move_to ueberhaupt einen
-    # bestehenden Ausgang meint oder "stay" (die Ankunft in einem neuen Raum
-    # laeuft NIE ueber actor_move_to - der neue Raum steht zum Zeitpunkt
-    # dieses Aufrufs noch nicht in actor_exits, kann also in ActorMoveTos
-    # Literal gar nicht auftauchen; new_room mit einem Namen IMPLIZIERT
-    # deshalb selbst die Ankunft dort, siehe state.World.apply_turn).
+    # bestehenden Knoten meint oder "stay" (die Ankunft in einem neuen Raum
+    # laeuft NIE ueber actor_move_to - der neue Raum hat noch keine Id, kann
+    # in ActorMoveTos Literal also gar nicht auftauchen; new_room mit einem
+    # Namen IMPLIZIERT selbst die Ankunft dort, siehe state.World.apply_turn).
     if mode == "player":
         class NewCharacter(BaseModel):
             model_config = STRICT
@@ -377,12 +386,23 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
                             "actor_move_to to 'stay' - arriving there "
                             "happens automatically.")
             actor_move_to: ActorMoveTo = Field(
-                description="where the player ends up, or stay. Only an "
-                            "exit of their current node - or 'stay' if you "
-                            "are proposing a new room this turn.")
+                description="the room the player is HEADING FOR - any room on "
+                            "the map, not only a neighbouring one. If it is "
+                            "not adjacent, they cover one step toward it this "
+                            "turn and keep going next turn; you never "
+                            "teleport them. 'stay' (or the id of the room "
+                            "they are already in) whenever they did not move "
+                            "at all - talked, read, handed something over, "
+                            "stood still. Most turns are 'stay'. 'stay' as "
+                            "well if you are proposing a new room this turn.")
             moves: list[Move] = Field(
-                description="OTHER characters moved as a side effect this "
-                            "turn - not the player")
+                description="OTHER characters who move this turn - not the "
+                            "player. Use this when the player's action takes "
+                            "someone here WITH them ('we go', 'I drive us "
+                            "there', 'come on') - add that person with the "
+                            "same target as actor_move_to so they travel "
+                            "together. Also for someone the player sends off, "
+                            "or who leaves on their own in reaction.")
             status_changes: list[StatusChange] = Field(
                 description="characters whose condition changes this turn")
             marks_added: list[Mark] = Field(
@@ -415,12 +435,18 @@ def resolve_model(node_ids: tuple[str, ...], char_ids: tuple[str, ...],
                         "cannot yet be an exit, so set actor_move_to to "
                         "'stay' - arriving there happens automatically.")
         actor_move_to: ActorMoveTo = Field(
-            description="where you end up, or stay. Only an exit of your "
-                        "current node - or 'stay' if you are proposing a "
-                        "new room this turn.")
+            description="the room you are HEADING FOR - any room on the map, "
+                        "not only a neighbouring one. If it is not adjacent "
+                        "you cover one step toward it this turn and keep "
+                        "going next turn; you never teleport. 'stay' (or the "
+                        "id of the room you are already in) whenever you did "
+                        "not move at all. 'stay' as well if you are proposing "
+                        "a new room.")
         moves: list[Move] = Field(
-            description="OTHER characters moved as a side effect this turn "
-                        "- not you, you use actor_move_to")
+            description="OTHER characters who move this turn - not you (you "
+                        "use actor_move_to). Use it for someone you lead or "
+                        "send somewhere, or who leaves in reaction - add them "
+                        "with their target node.")
         status_changes: list[StatusChange] = Field(
             description="characters whose condition changes this turn")
         marks_added: list[Mark] = Field(

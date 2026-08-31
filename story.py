@@ -106,6 +106,29 @@ PARTS = ("init.txt", "decide.txt", "resolve_player.txt",
 # selten je braucht.
 _FALLBACK_NAMES = ["Vale", "Marrow", "Osei", "Brandt", "Iker"]
 
+# Typografische Anfuehrungszeichen je Sprache. Gerade ASCII-"..." aus der
+# Spielereingabe wandern sonst 1:1 in die deutsche Narration UND in den
+# NARRATE-JSON-String - ein nicht-escaptes " terminiert dort den String zu
+# frueh und die halbe Szene geht verloren (Playtest R1/R2: NARRATE bricht
+# mitten im Satz ab). Deshalb schon in _normalize_input ersetzt.
+_QUOTES = {"de": ("„", "“"), "fr": ("« ", " »"),
+           "en": ("“", "”")}
+
+
+def _typographic_quotes(text: str, lang: str) -> str:
+    """Gerade " durch die typografischen Paare der Sprache ersetzen,
+    abwechselnd oeffnend/schliessend. Unbekannte Sprache -> „curly"."""
+    op, cl = _QUOTES.get((lang or "").split("-")[0].lower(),
+                         ("“", "”"))
+    out, opening = [], True
+    for ch in text:
+        if ch == '"':
+            out.append(op if opening else cl)
+            opening = not opening
+        else:
+            out.append(ch)
+    return "".join(out)
+
 # Greift, wenn ein Spielsystem kein eigenes normalize.txt mitbringt (wie
 # npc_names.txt optional, NICHT in PARTS). Bringt die Spieler-Eingabe in die
 # Ich-Perspektive, bevor sie in den Ledger geht - der Spieler steuert nur die
@@ -162,8 +185,38 @@ _PHASE_NOTE = {
 }
 
 
+_AIM_STOPWORDS = frozenset(
+    "the a an to i my me you your he she it they them his her their of for "
+    "and or but so that this with without into onto from at on in by as is "
+    "are be will would can could should not no do does done have has had "
+    "get gets got make makes made take takes taken keep keeps kept about "
+    "player boy girl man woman".split())
+
+
+def _aims_alike(a: str, b: str) -> bool:
+    """Zwei aims 'im Kern gleich'? Wort-Jaccard ueber die Inhaltswoerter.
+
+    Damit greift die Loop-Bremse auch, wenn das Modell dieselbe Absicht nur
+    umformuliert ('get him to sign' / 'make him put his name down'). Reiner
+    String-Vergleich waere zu leicht zu umgehen (Playtest R2-R4).
+    """
+    def words(s: str) -> set[str]:
+        toks = "".join(c if c.isalnum() or c.isspace() else " "
+                       for c in s.lower()).split()
+        return {t for t in toks if t not in _AIM_STOPWORDS and len(t) > 2}
+    wa, wb = words(a), words(b)
+    if not wa or not wb:
+        return a.strip().lower() == b.strip().lower()
+    return len(wa & wb) / len(wa | wb) >= 0.5
+
+
 def _phase(turn: int) -> str:
-    return "setup" if turn <= 4 else "commit" if turn <= 9 else "escalate"
+    # "escalate" beginnt bei MIN_SCENES (8): ab da DARF can_end feuern, also
+    # soll ab da auch die Regie "bring die Sache zu einem Punkt / ein
+    # Rausgehen des Spielers zaehlt" gelten - sonst haelt der Narrator eine
+    # laengst aufgeloeste Geschichte offen, weil "commit" noch sagt
+    # "entwickeln" (Playtest R4G3: Prämisse Szene 6 gelöst, can_end erst 13).
+    return "setup" if turn <= 3 else "commit" if turn <= 7 else "escalate"
 
 # Wie viele DECIDE-Aufrufe der agentischen Figuren einer Runde gleichzeitig
 # gegen vLLM laufen duerfen (_decide_all). Die Aufrufe sind unabhaengig -
@@ -434,6 +487,13 @@ class Game:
             decisions = self._decide_all(world, agents, player_input)
             for npc, decision in zip(agents, decisions):
                 if decision is not None:
+                    if npc.aim:
+                        npc.aim_history.append(npc.aim)
+                        del npc.aim_history[:-3]   # nur die letzten 3
+                        if _aims_alike(npc.aim, decision.aim):
+                            npc.aim_stale += 1
+                        else:
+                            npc.aim_stale = 0
                     npc.aim = decision.aim
             for npc, decision in zip(agents, decisions):
                 if decision is None:
@@ -520,14 +580,18 @@ class Game:
         """
         p = _phase(turn)
         block = f"SCENE {turn} of {MAX_SCENES}\nPHASE {p}: {_PHASE_NOTE[p]}"
-        if turn >= MAX_SCENES - 3:
-            block += ("\nCLOSING: only a few scenes left. If the thing this "
+        if turn >= MIN_SCENES:
+            block += ("\nCLOSING IS ALLOWED FROM HERE. If the thing this "
                       "story was about has been settled OR walked away from "
                       "for good OR made moot by what has happened - and the "
-                      "scene is now just winding down or drifting - this is "
-                      "the end: report can_end true. A messy, unresolved, or "
-                      "sad ending is still an ending. Do not hold the game "
-                      "open for a tidy resolution that is not coming.")
+                      "scene is now just winding down, drifting, or has moved "
+                      "to somewhere unrelated - this is the end: report "
+                      "can_end true. A messy, unresolved, or sad ending is "
+                      "still an ending. Do not hold the game open for a tidy "
+                      "resolution that is not coming, and do not treat a new "
+                      "location the player has moved to as a fresh scene to "
+                      "develop - if the story is over, arriving somewhere new "
+                      "is the epilogue.")
         return block
 
     def _resolve(self, world: World, actor_id: str, actor_node: str,
@@ -536,10 +600,9 @@ class Game:
         Delta aufloesen.
 
         resolve_cls wird bei JEDEM Aufruf frisch gebaut, nicht einmal pro
-        Runde: node_ids/active_ids/die Ausgaenge des Akteurs koennen sich
-        MITTEN in der Runde aendern (der Spielerzug kann neue Charaktere
-        oder Raeume erzeugt haben - die Grammatik des agentischen Zuges muss
-        das schon sehen).
+        Runde: node_ids/active_ids koennen sich MITTEN in der Runde aendern
+        (der Spielerzug kann neue Charaktere oder Raeume erzeugt haben - die
+        Grammatik des agentischen Zuges muss das schon sehen).
 
         turn ist die laufende Rundennummer (fuer den Phasen-Regieblock).
         direction ist der optionale STORY-DIRECTION/MANDATORY-Regiehinweis
@@ -548,9 +611,13 @@ class Game:
         sich spaeter nicht mehr unterscheiden, was das Modell aus der Welt
         wusste und was ihm der Client zugefluestert hat.
         """
+        # actor_move_to darf jeden Knoten nennen (nicht nur Nachbarn):
+        # World.apply_turn macht daraus den Ein-Schritt-Zug auf dem kuerzesten
+        # Weg. Frueher war das Literal auf Nachbar-Exits verengt - dann konnte
+        # das Modell ein 2-Hop-Ziel nicht ausdruecken, xgrammar erzwang einen
+        # Zufalls-Exit oder "stay", Figuren blieben kleben (Playtest R3G1/R3G3).
         resolve_cls = schema.resolve_model(
-            world.node_ids(), world.resolvable_ids(),
-            world.exits_from(actor_node), mode)
+            world.node_ids(), world.resolvable_ids(), mode)
 
         prompt_file = "resolve_player.txt" if mode == "player" else "resolve_agentic.txt"
         system = self._system(self.prompts[prompt_file], resolve_cls)
@@ -593,13 +660,14 @@ class Game:
         Rede ist oder aus genau einem Rede-Zitat besteht. Sonst ein billiger
         strukturierter Aufruf ohne Denkprozess (call="normalize").
         """
+        lang = self.world.language if self.world else "de"
         text = raw.strip()
         if not text:
             return raw
         if '"' not in text and re.match(r"(?i)(ich|wir|i|we)\b", text):
             return text
         if text.startswith('"') and text.endswith('"') and text.count('"') == 2:
-            return text
+            return _typographic_quotes(text, lang)
 
         try:
             cls = schema.normalize_model()
@@ -611,10 +679,11 @@ class Game:
             out = schema.normalized_text(reply.value).strip()
         except Exception as e:
             self._log_block("NORMALIZE failed - using raw input", str(e))
-            return text
+            return _typographic_quotes(text, lang)
 
-        self._log_block("NORMALIZE", f"{text}\n--\n{out}")
-        return out or text
+        result = _typographic_quotes(out or text, lang)
+        self._log_block("NORMALIZE", f"{text}\n--\n{result}")
+        return result
 
     def _resolve_block_player(self, player_input: str) -> str:
         return f"ACTING: the player\nPLAYER ACTION:\n{player_input}\n"

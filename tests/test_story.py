@@ -257,8 +257,10 @@ class PhaseDirectorTest(GameTestCase):
     RESOLVE (beide Modi) und NARRATE - aber NICHT an DECIDE."""
 
     def test_phase_boundaries(self):
+        # escalate ab MIN_SCENES (8): ab da darf can_end feuern, also gilt ab
+        # da auch die "bring es zu einem Punkt"-Regie (R5, Playtest R4G3).
         self.assertEqual(
-            [story._phase(t) for t in (1, 4, 5, 9, 10, 15, 99)],
+            [story._phase(t) for t in (1, 3, 4, 7, 8, 15, 99)],
             ["setup", "setup", "commit", "commit", "escalate", "escalate",
              "escalate"])
 
@@ -311,10 +313,14 @@ class NormalizeInputTest(GameTestCase):
         self.assertNotIn("Normalized", engine.calls)
         game.close()
 
-    def test_pure_quote_kept_verbatim(self):
+    def test_pure_quote_gets_typographic_marks(self):
+        # gerade " brechen sonst den NARRATE-JSON-String; sie werden auf die
+        # typografischen Zeichen der Spielsprache gebracht.
         game = self._game(FakeEngine())
-        game.world = _world_with_agents("Vogel")
-        self.assertEqual(game._normalize_input('"Hände hoch!"'), '"Hände hoch!"')
+        game.world = _world_with_agents("Vogel")          # language="en"
+        self.assertEqual(game._normalize_input('"Hands up!"'), "“Hands up!”")
+        game.world.language = "de"
+        self.assertEqual(game._normalize_input('"Hände hoch!"'), "„Hände hoch!“")
         game.close()
 
     def test_du_phrasing_is_rewritten_via_model(self):
@@ -366,6 +372,82 @@ class DecidePlayerActionTest(GameTestCase):
     def test_block_absent_when_apart(self):
         ctx = self._run("n2")            # Vogel @ n2, Spieler @ n1
         self.assertNotIn("THIS ROUND THE PLAYER JUST DID", ctx)
+
+
+class AimHistoryTest(GameTestCase):
+    """story.advance schiebt den alten aim jeder Figur in aim_history (max 3),
+    render_for zeigt sie - Anti-Loop-Signal."""
+
+    def test_aim_history_accumulates_and_renders(self):
+        game = self._game(FakeEngine())
+        world = _world_with_agents("Vogel")
+        world.characters["c1"].aim = "get the keys"
+        game.world = world
+        game.advance("ich warte")            # FakeEngine setzt aim = "" (Decide-Default)
+        self.assertEqual(game.world.characters["c1"].aim_history, ["get the keys"])
+        rendered = game.world.render_for(game.world.characters["c1"])
+        self.assertIn("ROUTES YOU HAVE ALREADY TRIED", rendered)
+        self.assertIn("get the keys", rendered)
+        game.close()
+
+
+class AimsAlikeTest(unittest.TestCase):
+    def test_identical(self):
+        self.assertTrue(story._aims_alike("get him to sign the form",
+                                          "get him to sign the form"))
+
+    def test_near_repeat_caught(self):
+        # leichte Umformulierung derselben Absicht - der haeufige Fall bei
+        # diesem Modell (Playtest R3-R4).
+        self.assertTrue(story._aims_alike(
+            "make him state the exact steel quantity before he touches a tool",
+            "get him to state the steel quantity before touching any tool"))
+
+    def test_genuinely_different(self):
+        self.assertFalse(story._aims_alike(
+            "convince him the drive is safe",
+            "sit down and tell him about the accident"))
+
+
+class AimStaleBrakeTest(GameTestCase):
+    """aim_stale >= 2 (3x im Kern dieselbe aim) blendet in render_for eine
+    harte Loop-Bremse ein statt der milden ROUTES-Liste (R5, Playtest R4G3
+    aim 9x identisch)."""
+
+    def test_hard_brake_after_repeats(self):
+        world = _world_with_agents("Vogel")
+        c = world.characters["c1"]
+        c.aim = "urge the player to take me inside"
+        c.aim_stale = 2
+        rendered = world.render_for(c)
+        self.assertIn("YOU ARE STUCK", rendered)
+        self.assertNotIn("ROUTES YOU HAVE ALREADY TRIED", rendered)
+
+
+class ActorMoveToGrammarTest(GameTestCase):
+    """_resolve baut die actor_move_to-Grammatik so, dass der aktuelle
+    Knoten ein gueltiges 'hier bleiben' ist (sonst teleportiert das Modell
+    bei jeder Nicht-Bewegung, Playtest R1)."""
+
+    def test_current_node_in_grammar(self):
+        seen = {}
+
+        class Capturing(FakeEngine):
+            def structured(self, messages, model_cls, *, call="", retries=1):
+                self.calls.append(model_cls.__name__)
+                if model_cls.__name__ == "ResolvePlayer":
+                    enum = model_cls.model_json_schema()[
+                        "properties"]["actor_move_to"]["enum"]
+                    seen["enum"] = set(enum)
+                return _reply(_fill(model_cls))
+
+        game = self._game(Capturing())
+        game.world = _world_with_agents("Vogel")   # Spieler @ n1, Exit n2
+        game.advance("ich schaue mich um")
+        self.assertIn("n1", seen["enum"])
+        self.assertIn("n2", seen["enum"])
+        self.assertIn("stay", seen["enum"])
+        game.close()
 
 
 class StrandedEndingTest(GameTestCase):

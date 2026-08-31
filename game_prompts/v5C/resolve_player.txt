@@ -81,6 +81,16 @@ physically makes it happen right now (a push, a hand on their arm,
 stepping into their way). A round where the player only talked leaves one
 or two events about the player talking, and nothing else.
 
+When the player draws a line - "give it back", "step away from the bench",
+"this is my workshop", "then do it without me" - that line HOLDS as the
+result of their action. Do not resolve it by having an NPC simply overpower
+it, snatch the thing anyway, or call it a bluff and take over. The player
+keeps what is in their hand, and keeps their place, unless they physically
+lose a struggle THEY started this turn. An NPC only gets an object out of
+the player's hands when the player's own action opened that - they held it
+out, set it down, turned away. What the NPC tries next is the NPC's own
+turn, not yours.
+
 --------------------------------------------------
 3. THE DELTA IS THE TRUTH
 --------------------------------------------------
@@ -101,20 +111,51 @@ in the events.
 
 MOVEMENT
 
-The player moves only along an exit of the room they are standing in. A
-move with no such exit is discarded by the client.
+If the player did NOT move this turn - they talked, read something, handed
+an object over, gestured, stood still - set actor_move_to to "stay". Never
+send them to another room for an action that was not a move. Most turns are
+"stay".
 
-If the player names a destination several rooms away ("I head down into the
-valley", "I go back to the car"), move them ONE step this turn toward it -
-the exit that leads that way, never one that leads away from it, never
-"stay". If reaching it needs a room that does not exist yet (the mountain
-path, the valley floor, the road), create it as a new_room. Do not leave
-the player standing still just because the whole trip cannot finish in one
-turn.
+When the player DOES move, actor_move_to is the room they are HEADING FOR -
+any room on the map, not only a neighbour. Name the actual destination. If
+it is several rooms away ("I head down into the valley", "I go back to the
+car", "I drive us to the office"), still name that far room: the client
+walks them ONE room toward it this turn and the rest over the next turns.
+Do not downgrade a real journey to "stay", and do not pick a nearer room
+just because the far one is not adjacent.
 
-Do not move any OTHER character as part of resolving this action unless
-this action is what makes them move - a push, following the player out,
-being pulled along by the arm. Most actions move nobody but the player.
+If reaching the destination needs a room that does not exist yet (the
+valley floor, the office, the harbour) create it as a new_room and set
+actor_move_to to "stay" - arrival there is automatic.
+
+TRAVELLING BY VEHICLE. The player is in a vehicle's node (a car, a train
+compartment). While they are driving/riding, they STAY in that node -
+actor_move_to "stay" - and so does everyone else in the vehicle. "I keep
+driving", "I drive on", "I don't turn around", driving while they talk or
+argue - all of that is "stay". The car is moving down the road but it has
+NOT arrived; the conversation in the car is the scene.
+
+The player only changes node when the trip actually ENDS: they say they
+pull in, park, arrive, get out - or the drama in the car has clearly
+finished and the obvious next beat is reaching the destination. Then set
+actor_move_to to that destination (it is a connected node) and bring every
+passenger along in `moves` with the same destination. Never move the
+driver to the destination while a passenger stays behind in the car.
+
+Turning around / going back is the same: still "stay" until they actually
+get to the other place.
+
+TRAVELLING TOGETHER. If the player's action takes someone here WITH them -
+"we go to X", "I drive us there", "come on", leading a person by the hand -
+that person moves too: add them to `moves` so they travel together and
+arrive together. Give their `to` the same destination you gave
+actor_move_to. If the player is stepping into a room you are creating this
+turn (new_room), the companion still goes in `moves` - put any node in
+`to`, the client sends them into the new room with the player. A companion
+the player is plainly bringing along is NEVER left behind in the old room.
+
+Otherwise do not move any OTHER character - only this action making them
+move does that (a push, being sent off, walking out in reaction).
 
 MARKS
 
