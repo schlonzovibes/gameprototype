@@ -28,7 +28,10 @@ services:
     ipc: host
     volumes:
       - ~/git/gameprototype:/workspace/gameprototype
-      - ~/git/gameprototype/cache:/root/.cache
+      # HF-Modelle liegen ausserhalb des Repos (verschoben aus dem alten
+      # ~/git/gameprototype/cache). Mounted nach /root/.cache/huggingface,
+      # damit models.py sie wie gewohnt unter .../hub findet.
+      - /srv/ai/models/huggingface:/root/.cache/huggingface
       # vLLM-Server aus dem Spiel heraus steuern (llm.VLLM.load)
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -36,8 +39,9 @@ services:
       # Ollama laeuft auf dem Host - nur via host-gateway erreichbar
       # (Voraussetzung: OLLAMA_HOST=0.0.0.0 ollama serve auf dem Host).
       OLLAMA_URL: http://host.docker.internal:11434
-      # Sprach- UND Bildmodelle liegen im selben HF-Cache (/root/.cache);
-      # models.py findet ihn ohne weitere Konfiguration.
+      # Sprach- UND Bildmodelle liegen im selben HF-Cache
+      # (/root/.cache/huggingface); models.py findet ihn ohne weitere
+      # Konfiguration.
 
       # Kontextfenster. Ein Aufruf ist stateless (System-Prompt + gerenderter
       # Weltzustand, kein Chatverlauf) - real ~3-4k Tokens Prompt. 65536 ist
@@ -164,9 +168,9 @@ services:
     # Dockers tini als PID 1 davor, das genau diese Waisen abraeumt.
     init: true
     volumes:
-      # gleicher Cache wie das Spiel: jedes gelistete Modell ist servierbar,
-      # ohne dass vLLM es aus dem Netz zieht
-      - ~/git/gameprototype/cache:/root/.cache
+      # gleicher Cache wie das Spiel (ausserhalb des Repos): jedes gelistete
+      # Modell ist servierbar, ohne dass vLLM es aus dem Netz zieht
+      - /srv/ai/models/huggingface:/root/.cache/huggingface
     environment:
       - HF_TOKEN=${HF_TOKEN}
       # Arena-Rezept: schnellerer Pfad im Marlin-NVFP4-Kernel auf dem GB10.
